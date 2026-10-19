@@ -1,12 +1,22 @@
 /**
+ * SPDX-License-Identifier: CC-BY-NC-SA-4.0
+ * Copyright (c) 2026 FigVam (figvam2050@gmail.com)
+ *
+ * Licensed under Creative Commons Attribution-NonCommercial-ShareAlike 4.0 International.
+ * Commercial use, resale of hardware pre-flashed with this software, or paid services
+ * are strictly prohibited without prior written permission of the author.
+ *
+ * Hardware disclaimer: Third-party commercial PCB/hardware (Felicity Solar / OEM).
+ * The author is not affiliated with the hardware manufacturer. Aftermarket firmware.
+ *
  * BMS 485 to CAN Converter for Deye Inverter (Lithium Mode 00 - Deye generic
  * CAN / Pylontech). Hardware: GD32F305 + ISO1050 (CAN) + CA-IS3080WX (RS485)
  *
- * CLONE COMBOX_HUAWEI: upstream COMBOX_V1 (Vision V-LFP48100) → Huawei ESM
- * (ESM-48100, Modbus RTU RS485: адреси 0xD6–0xDD / 0xE0–0xE7). План адаптації
- * та база реєстрів — HUAWEI_REFERENCE.md (§5, §6, §7). Вихідний CAN-бік,
- * fail-closed, балансування, профілі DIP та PCS-485 (діагностика) — без змін;
- * DIP2-міст орієнтований на Vision-формат і на Huawei-шині не застосовується.
+ * COMBOX_HUAWEI: адаптація для промислових батарей Huawei ESM
+ * (ESM-48100 / ESM-48150, Modbus RTU RS485: адреси 0xD6–0xDD / 0xE0–0xE7).
+ * База знань та реєстри — HUAWEI_REFERENCE.md (§5, §6, §7).
+ * Вихідний CAN-бік (Pylontech для Deye), fail-closed, балансування,
+ * профілі DIP та PCS-485 (діагностичне дзеркало) активні.
  *
  * Frame set and layout follow "PCS CAN-Bus-protocol-DY-low-voltage V3.3" and
  * "PYLON low voltage Protocol CAN Bus v2.0.6": standard frames, 500 kbit/s,
@@ -56,7 +66,7 @@ enum HwQueryId : uint8_t {
   HW_Q_CELL,     // 0x0022 ×15: напруги комірок U16 мВ
   HW_Q_COUNT
   // 0x100B/0x100D (ліміти ×0.001 C) — відкладено (HUAWEI_REFERENCE §8, Q5);
-  // CCL/DCL на цьому етапі лишаються профільними від DIP, як у Vision.
+  // CCL/DCL на цьому етапі задаються профілями від DIP (40 А / 50 А на модуль).
 };
 
 static const HwQuery HW_QUERIES[HW_Q_COUNT] = {
@@ -121,7 +131,7 @@ static uint16_t modbus_crc16(const uint8_t *data, uint16_t len) {
 #define CELL_PHYSICAL_OV_CONFIRM_MV 3600
 #define CELL_PHYSICAL_OV_WARN_CONFIRM_MV 3550
 
-// Vision V-LFP48100 cell protection thresholds (HMI ground truth: Warn 2800 mV, Protect 2500 mV, Release 3000 mV):
+// LiFePO4 cell protection thresholds (Warn 2800 mV, Protect 2500 mV, Release 3000 mV):
 #define CELL_UV_WARN_MV 2800
 #define CELL_DISCHARGE_STOP_MV 2650
 #define CELL_DISCHARGE_REENABLE_MV 3000
@@ -470,7 +480,7 @@ static void rs485_flush_rx(void) {
 #define BR_SWEEP_MAX_MS 15000UL // inverter loop ≈13 s for 16 addrs @ ~400 ms
 
 static void watchdog_feed(void);
-static bool bms_parse_response(uint8_t expected_addr); // Vision frame; DIP2 bridge path only
+static bool bms_parse_response(uint8_t expected_addr); // Legacy 83-byte frame (DIP2 bridge test path)
 static void bms_aggregate_data(void);
 static void agg_reset(void);
 static void hw_send_query(uint8_t addr_idx, uint8_t q);
@@ -1035,7 +1045,7 @@ static void hw_advance_addr(void) {
   }
 }
 
-// Машина станів власного опиту Huawei (замість Vision sweep «1 адреса/200 мс»):
+// Машина станів опиту Huawei ESM (неблокуючий FSM):
 //  - модуль із pack_ever_seen_mask — повна серія HW_QUERIES, пауза
 //    HW_INTER_QUERY_MS між кадрами (§7.3: 20–50 мс);
 //  - невідома адреса — тільки скан-проба wake-up не частіше
@@ -1171,7 +1181,7 @@ static uint16_t calculate_discharge_limit(uint8_t pack_count) {
     return 0;
   }
 
-  // Cell voltage cut-off: hard cut <= 2650 mV, re-enable >= 3000 mV (Vision HMI Release)
+  // Cell voltage cut-off: hard cut <= 2650 mV, re-enable >= 3000 mV
   if (agg_min_cell_mv <= CELL_DISCHARGE_STOP_MV) {
     discharge_cell_uv_inhibit = true;
   } else if (discharge_cell_uv_inhibit) {
@@ -1417,11 +1427,9 @@ static void agg_reset(void) {
   agg_min_cell_mv = 0xFFFF;
 }
 
-// Мапінг аварій Huawei → біти 0x359. Етап 2 Q17 (ERRORS_REFERENCE §7):
-// підмножина OV/UV/OT/UT/System error З фізичною перехресною перевіркою —
-// той самий стиль, що й Vision-парсер (ніколи не «сліпе» мапіння бітів).
+// Мапінг аварій Huawei → біти 0x359 (з фізичною перехресною перевіркою).
 // Дискретні аварії (0x0048/0x004A: OC, anti-theft, внутрішнє OV тощо) лишаються
-// log-only у hw_mod.alarm до стенд-верифікації (§7.4 крок 3, Q17 етап 3).
+// log-only у hw_mod.alarm до стенд-верифікації на реальному обладнанні.
 static void hw_map_alarms(void) {
   for (uint8_t i = 0; i < 16; i++) {
     if (!(hw_alarm_seen_mask & (1u << i)))
@@ -1450,7 +1458,7 @@ static void hw_map_alarms(void) {
     if ((sysf & 0x7E) || (modst & 0x0003))
       sweep_protect_b1 |= CAN_PROT_SYSTEM_ERROR;
 
-    // Warning → 0x359 байти 2–3 (пом'якшені пороги, як у Vision)
+    // Warning → 0x359 байти 2–3 (пороги раннього попередження)
     if ((warn & (1u << 5)) && m->cell_max >= CELL_PHYSICAL_OV_WARN_CONFIRM_MV)
       sweep_alarm_b2 |= (CAN_PROT_CELL_OV | CAN_PROT_PACK_OV);
     if ((warn & (1u << 4)) && m->pack_v >= 54.0f)
@@ -1752,8 +1760,8 @@ int main(void) {
       balance_led_tick(now);
     }
     // Власний опит Huawei: серія запитів на відомі модулі + скан невідомих;
-    // DIP2 ON всередині hw_poll_service() — це чистий міст (без власних
-    // команд); міст орієнтований на Vision-формат і на Huawei-шині не застосовується.
+    // DIP2 ON всередині hw_poll_service() — це міст (без власних
+    // команд; для промислової роботи DIP2 завжди вимкнено — дзеркало).
     hw_poll_service(now);
 
     // Pure bridge (DIP2 ON): relay inverter <-> BMS and keep CAN fed from the

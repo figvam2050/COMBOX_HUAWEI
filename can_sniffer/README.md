@@ -19,7 +19,7 @@
 * [`../PORT_MAPPING.md`](../PORT_MAPPING.md) — незмінний еталон фізичних пінів
   (MCU ↔ CAN/RS485: PB8/PB9 = PCS-CAN, `chmod 444`);
 * [`../tools/rs485_sniff.py`](../tools/rs485_sniff.py) — пасивний RS485-сніфер
-  шини батарей (Vision/Modbus), для повного логування обох шин.
+  шини батарей (Huawei ESM / Modbus RTU), для повного логування обох шин.
 
 ## Апаратні цілі
 
