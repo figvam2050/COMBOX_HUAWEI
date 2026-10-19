@@ -3,13 +3,48 @@
 > **⚠️ Це окремий проєкт-клон для варіанту з батареями Huawei ESM** (створено 19.10.2026
 > копією основного проєкту `COMBOX-main_4 2`; код і збірка Huawei-варіанту живуть тут,
 > `#ifdef` не потрібні). Основний проєкт (Vision + Deye) — у `COMBOX-main_4 2`, його ця
-> папка не зачіпає. План адаптації — [`HUAWEI_REFERENCE.md`](HUAWEI_REFERENCE.md) §7;
-> поки `compiled_firmware*/` містять ще незмінену вихідну збірку — їх замінить
-> перша збірка після адаптації RS485-боку під Huawei ESM.
+> папка не зачіпає. RS485-бік адаптовано під Huawei ESM 19.10.2026 (див. нижче
+> «Швидкий старт» і [`HUAWEI_REFERENCE.md`](HUAWEI_REFERENCE.md) §7 та додаток від 19.10.2026).
 
 Прошивка PlatformIO для мікроконтролера **GD32F305RCT6** (Cortex-M4F, 256K Flash, 96K RAM), яка виконує роль інтелектуального шлюзу між акумуляторним банком **Vision V-LFP48100 (15S LiFePO4)** та гібридним інвертором **Deye** (протокол CAN Lithium Mode 00 = Pylontech CAN v2.0.6, 500 кбіт/с).
 
-Єдине джерело коду прошивки — [`src/main.cpp`](src/main.cpp) (~1470 рядків, чистий FSM, без RTOS).
+У цьому клоні RS485-бік опиту налаштований на **Huawei ESM** (ESM-48100): адреси
+0xD6–0xDD / 0xE0–0xE7, серія FC03-запитів замість одного Vision-вікна — див.
+[`HUAWEI_REFERENCE.md`](HUAWEI_REFERENCE.md) §5–§7. Вихідний CAN-бік (Pylontech
+для Deye), fail-closed, балансування, профілі DIP і діагностика PCS-485 — без змін
+від основного проєкту; DIP2-міст орієнтований на Vision-формат і на
+Huawei-шині не застосовується. Єдине джерело коду прошивки —
+[`src/main.cpp`](src/main.cpp) (~1800 рядків, чистий FSM, без RTOS). Опис нижче —
+здебільшого спільний з основним проєктом (Vision); для цього клону застосовні
+ті місця, де явно згадано Huawei.
+
+---
+
+## Швидкий старт (новий розробник: клон → VS Code → збірка)
+
+```bash
+git clone https://github.com/figvam2050/COMBOX_HUAWEI.git
+```
+
+1. **VS Code:** `File → Open Folder…` → обрати папку `COMBOX_HUAWEI`.
+   При першому відкритті VS Code запропонує встановити розширення з
+   [`.vscode/extensions.json`](.vscode/extensions.json) — встановіть
+   **PlatformIO IDE** (саме воно збирає прошивку).
+2. **Збірка:** іконка PlatformIO в панелі → `Project Tasks → genericGD32F305 →
+   Build`, або в терміналі `pio run`. Обидва варіанти збірки (standalone та
+   `_app` під заводський завантажувач) збираються одним `pio run`.
+3. **Готові прошивки без збірки:** `compiled_firmware/firmware.bin|.hex`
+   (standalone) і `compiled_firmware_app/` (образ під завантажувач, з
+   магією G5RC). Завантаження — через ST-Link (`pio run -t upload`).
+4. **Перевірки:** `python3 tools/verify_dump.py --selftest` та `--queries`
+   (регресія парсера/фікстур дампів). Окремий підпроєкт-сніфер CAN — папка
+   `can_sniffer/` (відкривається в VS Code як окремий проєкт PlatformIO).
+5. **Файли з правами лише для читання:** `DEYE_CAN_RS485_BASE.md` і
+   `PORT_MAPPING.md` — еталони з `chmod 444`. Для редагування:
+   `chmod 644 <файл>` → правка → `chmod 444 <файл>` (регламент у §0 цих файлів).
+6. **Ігнорується навмисно** (див. [`.gitignore`](.gitignore)): `.pio/`,
+   локальні `.vscode/` (крім рекомендацій), особисті `CODE_REVIEW*.md`,
+   `deye/`, заводський бекап. Усе потрібне для збірки — в репозиторії.
 
 ---
 

@@ -7,8 +7,13 @@ compiled_firmware_app/
 # Firmware hex/bin archive compiled_firmware/ is tracked on purpose so
 # releases can be flashed without building.
 
-# --- VS Code / PlatformIO IDE: machine-specific, regenerated locally ---
-.vscode/
+# --- VS Code / PlatformIO IDE ---
+# Локальні файли (c_cpp_properties, tasks, launch) генерує PlatformIO IDE
+# після першої збірки — вони машинозалежні. Рекомендація розширення
+# навпаки ПОВИННА їхати в репозиторії, щоб новий розробник одразу отримав
+# підказку встановити PlatformIO.
+.vscode/*
+!.vscode/extensions.json
 
 # --- Особисті робочі нотатки (не для публічного репозиторію) ---
 CODE_REVIEW*.md
