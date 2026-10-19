@@ -2,6 +2,12 @@
  * BMS 485 to CAN Converter for Deye Inverter (Lithium Mode 00 - Deye generic
  * CAN / Pylontech). Hardware: GD32F305 + ISO1050 (CAN) + CA-IS3080WX (RS485)
  *
+ * CLONE COMBOX_HUAWEI: upstream COMBOX_V1 (Vision V-LFP48100) → Huawei ESM
+ * (ESM-48100, Modbus RTU RS485: адреси 0xD6–0xDD / 0xE0–0xE7). План адаптації
+ * та база реєстрів — HUAWEI_REFERENCE.md (§5, §6, §7). Вихідний CAN-бік,
+ * fail-closed, балансування, профілі DIP та PCS-485 (діагностика) — без змін;
+ * DIP2-міст орієнтований на Vision-формат і на Huawei-шині не застосовується.
+ *
  * Frame set and layout follow "PCS CAN-Bus-protocol-DY-low-voltage V3.3" and
  * "PYLON low voltage Protocol CAN Bus v2.0.6": standard frames, 500 kbit/s,
  * cycle 1 s, BMS transmits 0x351/0x355/0x356/0x359/0x35C/0x35E.
@@ -17,28 +23,47 @@
 #include <string.h>
 
 #define BMS_BAUDRATE 9600
-#define BMS_TIMEOUT_MS 200
-#define BMS_RESPONSE_LEN 83
-#define BMS_POLL_PERIOD_MS 200
+// HUAWEI_REFERENCE.md §3: таймаут відповіді 500 мс мінімум (активний модуль
+// відповідає за 45–90 мс; тиша = відсутня адреса або сплячий модуль).
+#define BMS_TIMEOUT_MS 500
 #define BMS_DEFAULT_TIMEOUT_MS 4000
 
-const uint8_t BMS_QUERY_TABLE[16][8] = {
-    {0x01, 0x03, 0x00, 0x00, 0x00, 0x27, 0x05, 0xD0},
-    {0x02, 0x03, 0x00, 0x00, 0x00, 0x27, 0x05, 0xE3},
-    {0x03, 0x03, 0x00, 0x00, 0x00, 0x27, 0x04, 0x32},
-    {0x04, 0x03, 0x00, 0x00, 0x00, 0x27, 0x05, 0x85},
-    {0x05, 0x03, 0x00, 0x00, 0x00, 0x27, 0x04, 0x54},
-    {0x06, 0x03, 0x00, 0x00, 0x00, 0x27, 0x04, 0x67},
-    {0x07, 0x03, 0x00, 0x00, 0x00, 0x27, 0x05, 0xB6},
-    {0x08, 0x03, 0x00, 0x00, 0x00, 0x27, 0x05, 0x49},
-    {0x09, 0x03, 0x00, 0x00, 0x00, 0x27, 0x04, 0x98},
-    {0x0A, 0x03, 0x00, 0x00, 0x00, 0x27, 0x04, 0xAB},
-    {0x0B, 0x03, 0x00, 0x00, 0x00, 0x27, 0x05, 0x7A},
-    {0x0C, 0x03, 0x00, 0x00, 0x00, 0x27, 0x04, 0xCD},
-    {0x0D, 0x03, 0x00, 0x00, 0x00, 0x27, 0x05, 0x1C},
-    {0x0E, 0x03, 0x00, 0x00, 0x00, 0x27, 0x05, 0x2F},
-    {0x0F, 0x03, 0x00, 0x00, 0x00, 0x27, 0x04, 0xFE},
-    {0x10, 0x03, 0x00, 0x00, 0x00, 0x27, 0x06, 0x91}};
+// --- Huawei ESM: адреси модулів і серія запитів (§7.2 п.1, §9) -------------
+// Скан: <addr> 03 00 00 00 01 <CRC> — wake-up і проба наявності; старт
+// скану не раніше ніж через ~2 с після старту UART (§4.2), повтори для
+// відсутніх адрес не частіше ніж раз на 3 с (§4.1).
+static const uint8_t HW_ADDR[16] = {0xD6, 0xD7, 0xD8, 0xD9, 0xDA, 0xDB,
+                                    0xDC, 0xDD, 0xE0, 0xE1, 0xE2, 0xE3,
+                                    0xE4, 0xE5, 0xE6, 0xE7};
+
+#define HW_PROBE_PERIOD_MS 3000 // пауза між спробами скану однієї адреси
+#define HW_INTER_QUERY_MS 30    // ≥10 мс, рекомендовано 20–50 мс (§3, §7.3)
+
+typedef struct {
+  uint16_t reg;
+  uint8_t qty;
+} HwQuery;
+
+enum HwQueryId : uint8_t {
+  HW_Q_WAKE = 0, // 0x0000 ×1: wake-up/проба наявності (§4.1) — лише для скану
+  HW_Q_BASE,     // 0x0000 ×7: bus V, pack V, струм, SOC, SOH, t max, t min
+  HW_Q_STATE,    // 0x000A ×1: стан модуля (0 Charge … 3 Free)
+  HW_Q_CYCLES,   // 0x0042 ×2: цикли розряду, U32 BE
+  HW_Q_AH,       // 0x0044 ×2: накопичений розряд Ah, U32 BE
+  HW_Q_ALARM,    // 0x0046 ×5: аварійні слова 0x0046..0x004A
+  HW_Q_NCELL,    // 0x010F ×1: кількість комірок
+  HW_Q_TEMP,     // 0x0012 ×15: температури комірок S16 °C
+  HW_Q_CELL,     // 0x0022 ×15: напруги комірок U16 мВ
+  HW_Q_COUNT
+  // 0x100B/0x100D (ліміти ×0.001 C) — відкладено (HUAWEI_REFERENCE §8, Q5);
+  // CCL/DCL на цьому етапі лишаються профільними від DIP, як у Vision.
+};
+
+static const HwQuery HW_QUERIES[HW_Q_COUNT] = {
+    {0x0000, 1}, {0x0000, 7}, {0x000A, 1}, {0x0042, 2}, {0x0044, 2},
+    {0x0046, 5}, {0x010F, 1}, {0x0012, 15}, {0x0022, 15},
+};
+
 
 static uint16_t modbus_crc16(const uint8_t *data, uint16_t len) {
   uint16_t crc = 0xFFFF;
@@ -267,6 +292,42 @@ static uint8_t pack_miss_count[16] = {0};
 static uint16_t pack_ever_seen_mask = 0;
 static uint16_t sweep_seen_mask = 0;
 
+// --- Huawei ESM: буфер даних модулів (індекс 0..15 ↔ HW_ADDR) --------------
+// У агрегат ідуть лише модулі, чия відповідь потрапила у sweep: базові суми
+// дедуплікуються hw_base_seen_mask (клітинки/температури/аварії — ідемпотентні).
+typedef struct {
+  float bus_v;           // 0x0000 ×0.01 В
+  float pack_v;          // 0x0001 ×0.01 В (клеми модуля)
+  float current;         // 0x0002 S16 ×0.01 А, +заряд / −розряд (§5.1)
+  uint8_t soc;           // 0x0003 %
+  uint8_t soh;           // 0x0004 %
+  int16_t t_max;         // 0x0005 °C
+  int16_t t_min;         // 0x0006 °C
+  uint8_t state;         // 0x000A: 0 Charge, 1 Discharge, 2 Full, 3 Free
+  uint32_t cycles;       // 0x0042–0x0043 U32 BE
+  uint32_t ah;           // 0x0044–0x0045 U32 BE
+  uint16_t alarm[5];     // 0x0046..0x004A (бітові мапи — §5.4)
+  uint8_t ncell;         // 0x010F
+  uint16_t cell_mv[15];  // 0x0022..0x0030, мВ
+  int16_t cell_temp[15]; // 0x0012..0x0020, °C
+  uint16_t cell_max;     // перерахунок на HW_Q_CELL (для мапінгу аварій)
+  uint16_t cell_min;
+  uint32_t last_ok_ms;   // остання валідна відповідь (будь-який запит)
+} HwModule;
+
+static HwModule hw_mod[16];
+static uint16_t hw_base_seen_mask = 0;  // базові суми цього sweep уже погоджені
+static uint16_t hw_alarm_seen_mask = 0; // свіжі аварійні слова для мапінгу 0x359
+static uint8_t agg_soh_min = 100;       // §6: SOH агрегату = мінімум по модулях
+
+// Машина станів опиту: адреса × запит; скан відсутніх — ≥3 с на адресу (§4.1),
+// старт скану — +2 с після старту UART (§4.2).
+static uint8_t hw_addr_idx = 0;
+static uint8_t hw_q_idx = 0;
+static uint32_t hw_next_slot_ms = 0;
+static uint32_t hw_probe_ms[16] = {0}; // 0 = ще не пробували
+static uint32_t hw_uart_ready_ms = 0;
+
 static uint16_t charge_voltage_limit = CHARGE_VOLTAGE_LIMIT_STATIC;
 static uint16_t charge_current_limit = CHARGE_CURRENT_LIMIT_DEFAULT;
 static uint16_t discharge_current_limit = DISCHARGE_CURRENT_LIMIT_DEFAULT;
@@ -409,9 +470,12 @@ static void rs485_flush_rx(void) {
 #define BR_SWEEP_MAX_MS 15000UL // inverter loop ≈13 s for 16 addrs @ ~400 ms
 
 static void watchdog_feed(void);
-static bool bms_parse_response(uint8_t expected_addr);
+static bool bms_parse_response(uint8_t expected_addr); // Vision frame; DIP2 bridge path only
 static void bms_aggregate_data(void);
 static void agg_reset(void);
+static void hw_send_query(uint8_t addr_idx, uint8_t q);
+static uint8_t hw_parse_response(uint8_t addr_idx, uint8_t q);
+static void hw_poll_service(uint32_t now);
 
 static void pcs_uart_init(void) {
   rcu_periph_clock_enable(RCU_GPIOD);
@@ -638,26 +702,40 @@ static void pcs_mode_apply(uint8_t code) {
     agg_reset();
 }
 
-static void bms_send_query(uint8_t addr_index) {
+static void hw_send_query(uint8_t addr_idx, uint8_t q) {
+  // FC03-запит серії HW_QUERIES: <addr> 03 <reg:2BE> <qty:2BE> <CRC:2LE>
+  uint8_t frame[8];
+  frame[0] = HW_ADDR[addr_idx];
+  frame[1] = 0x03;
+  frame[2] = (uint8_t)(HW_QUERIES[q].reg >> 8);
+  frame[3] = (uint8_t)(HW_QUERIES[q].reg & 0xFF);
+  frame[4] = 0;
+  frame[5] = HW_QUERIES[q].qty;
+  uint16_t crc = modbus_crc16(frame, 6);
+  frame[6] = (uint8_t)(crc & 0xFF); // lo-byte first (§3, як і у нас)
+  frame[7] = (uint8_t)(crc >> 8);
+
   rs485_flush_rx();
   uart_rx_index = 0;
   gpio_bit_set(LED_BMS485_PORT, LED_BMS485_PIN); // poll in flight
   // No DE pin on the transceiver (auto-direction, ORIGINAL_FIRMWARE.md §14.3):
   // just shift the frame out; direction switches in hardware.
   for (uint8_t i = 0; i < 8; i++) {
-    rs485_send_byte(BMS_QUERY_TABLE[addr_index][i]);
-    pcs_mirror_push(BMS_QUERY_TABLE[addr_index][i]); // no-op in bridge mode
+    rs485_send_byte(frame[i]);
+    pcs_mirror_push(frame[i]); // no-op in bridge mode
   }
 }
 
-static uint16_t bms_receive_response(void) {
+// Прийом до expected_len байт: тиша BMS_TIMEOUT_MS (500 мс — мінімум §3),
+// достроковий стоп на повному кадрі або на кадрі винятку Modbus (5 Б).
+static uint16_t bms_receive_response(uint16_t expected_len) {
   uart_rx_index = 0;
   uint32_t start_ms = millis();
   uint32_t wait_start = start_ms;
   while (millis() - wait_start < BMS_TIMEOUT_MS) {
     pcs_poll_service(millis()); // mirror drain / inverter RX while we wait
-    if (millis() - start_ms >= 500)
-      break; // жорсткий дедлайн від першого байта
+    if (millis() - start_ms >= BMS_TIMEOUT_MS + 500)
+      break; // жорсткий дедлайн (шум не може тягнути прийом безкінечно)
     if (usart_flag_get(USART0, USART_FLAG_RBNE) != RESET) {
       uint8_t byte = usart_data_receive(USART0);
       pcs_mirror_push(byte); // no-op in bridge mode
@@ -666,8 +744,10 @@ static uint16_t bms_receive_response(void) {
       } else {
         uart_rx_index = 0; // overflow
       }
-      if (uart_rx_index >= BMS_RESPONSE_LEN)
+      if (uart_rx_index >= expected_len)
         break; // кадр повний
+      if (uart_rx_index >= 5 && (uart_rx_buffer[1] & 0x80))
+        break; // виняток Modbus: <addr> 83 <code> <CRC> (5 байт)
       wait_start = millis();
     }
   }
@@ -807,10 +887,221 @@ static bool bms_parse_response(uint8_t expected_addr) {
     agg_current_sum += raw_current / 100.0f;
     agg_soc_sum += (uint8_t)(raw_soc & 0xFF);
     agg_soh_sum += (uint8_t)(raw_soh & 0xFF);
+    if ((uint8_t)(raw_soh & 0xFF) < agg_soh_min)
+      agg_soh_min = (uint8_t)(raw_soh & 0xFF); // єдине правило §6 для обох шляхів
     agg_count++;
   }
 
   return true;
+}
+
+// --- Huawei ESM: декод відповіді у hw_mod + живлення агрегат-сум (§5, §6) --
+// Повертає: 0 — не наш або битий кадр; 1 — дані FC03; 2 — виняток Modbus
+// (модуль на шині, але відмовився від реєстра — присутність враховується).
+static uint8_t hw_parse_response(uint8_t addr_idx, uint8_t q) {
+  uint8_t addr = HW_ADDR[addr_idx];
+  if (uart_rx_index < 5 || uart_rx_buffer[0] != addr)
+    return 0;
+
+  if (uart_rx_buffer[1] == 0x83) { // виняток Modbus, §4.4: <addr> 83 code CRC
+    if (uart_rx_index < 5)
+      return 0;
+    uint16_t crc = modbus_crc16((uint8_t *)uart_rx_buffer, 3);
+    if (((uint16_t)uart_rx_buffer[4] << 8 | uart_rx_buffer[3]) != crc)
+      return 0;
+    return 2;
+  }
+
+  uint16_t qty = HW_QUERIES[q].qty;
+  if (uart_rx_buffer[1] != 0x03 || uart_rx_buffer[2] != qty * 2)
+    return 0;
+  uint16_t frame_len = (uint16_t)(5 + 2 * qty);
+  if (uart_rx_index < frame_len)
+    return 0;
+  uint16_t received_crc = (uart_rx_buffer[frame_len - 1] << 8) |
+                          uart_rx_buffer[frame_len - 2];
+  uint16_t calculated_crc =
+      modbus_crc16((uint8_t *)uart_rx_buffer, frame_len - 2);
+  if (received_crc != calculated_crc)
+    return 0;
+
+  HwModule *m = &hw_mod[addr_idx];
+  const volatile uint8_t *d = &uart_rx_buffer[3]; // початок даних FC03
+
+  switch (q) {
+  case HW_Q_WAKE:
+    break; // проба наявності: дані (1 рег) не декодуємо
+
+  case HW_Q_BASE: {
+    // 0x0000 ×7: bus V, pack V, струм, SOC, SOH, t max, t min — усі ×0.01/°C
+    m->bus_v = ((uint16_t)(d[0] << 8) | d[1]) * 0.01f;
+    m->pack_v = ((uint16_t)(d[2] << 8) | d[3]) * 0.01f;
+    m->current = (float)(int16_t)((uint16_t)(d[4] << 8) | d[5]) * 0.01f;
+    uint16_t soc = (uint16_t)(d[6] << 8) | d[7];
+    uint16_t soh = (uint16_t)(d[8] << 8) | d[9];
+    int16_t t_max = (int16_t)((uint16_t)(d[10] << 8) | d[11]);
+    int16_t t_min = (int16_t)((uint16_t)(d[12] << 8) | d[13]);
+    m->soc = (uint8_t)soc;
+    m->soh = (uint8_t)soh;
+    m->t_max = t_max;
+    m->t_min = t_min;
+    // Базові суми — один раз на sweep на модуль (hw_base_seen_mask, бо
+    // sweep_seen_mask виставляється вже на першому успішному запиті).
+    if (!(hw_base_seen_mask & (1u << addr_idx))) {
+      hw_base_seen_mask |= (1u << addr_idx);
+      agg_voltage_sum += m->pack_v; // §6: середнє по модулях
+      agg_current_sum += m->current; // §6: сума; +заряд — CAN інвертує знак
+      agg_soc_sum += soc;           // §6: середнє (однакова ємність)
+      agg_soh_sum += soh;
+      if (soh < agg_soh_min)
+        agg_soh_min = soh; // §6: SOH агрегату = мінімум по модулях
+      agg_count++;
+    }
+    if (t_max >= -40 && t_max <= 120 && (float)t_max > agg_temp_max)
+      agg_temp_max = (float)t_max;
+    if (t_min >= -40 && t_min <= 120 && (float)t_min < agg_temp_min)
+      agg_temp_min = (float)t_min;
+    break;
+  }
+
+  case HW_Q_STATE:
+    m->state = (uint8_t)((uint16_t)(d[0] << 8) | d[1]); // 0..3, §7.2 п.4
+    break;
+
+  case HW_Q_CYCLES:
+    m->cycles = ((uint32_t)d[0] << 24) | ((uint32_t)d[1] << 16) |
+                ((uint32_t)d[2] << 8) | d[3]; // U32 BE, §5.3
+    break;
+
+  case HW_Q_AH:
+    m->ah = ((uint32_t)d[0] << 24) | ((uint32_t)d[1] << 16) |
+            ((uint32_t)d[2] << 8) | d[3]; // U32 BE, §5.3
+    break;
+
+  case HW_Q_ALARM:
+    for (uint8_t i = 0; i < 5; i++)
+      m->alarm[i] = (uint16_t)(d[i * 2] << 8) | d[i * 2 + 1]; // 0x0046..0x004A
+    hw_alarm_seen_mask |= (1u << addr_idx); // мапінг у 0x359 — у aggregate()
+    break;
+
+  case HW_Q_NCELL:
+    m->ncell = (uint8_t)((uint16_t)(d[0] << 8) | d[1]); // 15 у ESM-48100
+    break;
+
+  case HW_Q_TEMP: // 0x0012 ×15: S16 °C, саніті -40..120 (відсікає 0x7FFF)
+    for (uint8_t i = 0; i < 15; i++) {
+      int16_t t = (int16_t)((uint16_t)(d[i * 2] << 8) | d[i * 2 + 1]);
+      m->cell_temp[i] = t;
+      if (t >= -40 && t <= 120) {
+        if ((float)t > agg_temp_max)
+          agg_temp_max = (float)t;
+        if ((float)t < agg_temp_min)
+          agg_temp_min = (float)t;
+      }
+    }
+    break;
+
+  case HW_Q_CELL: { // 0x0022 ×15: U16 мВ
+    uint16_t cmax = 0, cmin = 0xFFFF;
+    for (uint8_t i = 0; i < 15; i++) {
+      uint16_t mv = (uint16_t)(d[i * 2] << 8) | d[i * 2 + 1];
+      m->cell_mv[i] = mv;
+      if (mv > cmax)
+        cmax = mv;
+      if (mv > 0 && mv < cmin)
+        cmin = mv;
+      if (mv > agg_max_cell_mv)
+        agg_max_cell_mv = mv;
+      if (mv > 0 && mv < agg_min_cell_mv)
+        agg_min_cell_mv = mv;
+    }
+    m->cell_max = cmax;
+    m->cell_min = cmin;
+    break;
+  }
+
+  default:
+    return 0;
+  }
+
+  return 1;
+}
+
+static void hw_advance_addr(void) {
+  hw_q_idx = HW_Q_BASE;
+  if (++hw_addr_idx >= 16) {
+    hw_addr_idx = 0;
+    bms_aggregate_data(); // sweep закрито: агрегація + мапінг аварій (§6)
+  }
+}
+
+// Машина станів власного опиту Huawei (замість Vision sweep «1 адреса/200 мс»):
+//  - модуль із pack_ever_seen_mask — повна серія HW_QUERIES, пауза
+//    HW_INTER_QUERY_MS між кадрами (§7.3: 20–50 мс);
+//  - невідома адреса — тільки скан-проба wake-up не частіше
+//    HW_PROBE_PERIOD_MS (≥3 с, §4.1), старт — після hw_uart_ready_ms (§4.2);
+//  - будь-яка валідна відповідь (дані чи виняток) оновлює
+//    last_bms_response_ms (fail-closed Q5) і sweep_seen_mask (присутність);
+//  - таймаут/битий кадр → перехід на НАСТУПНУ АДРЕСУ: мертвий модуль з'їдає
+//    не більше ніж один слот на sweep, а 3-miss debounce (Q21) вилучає його
+//    приблизно за 15 с (§6) за типового темпу sweep.
+static void hw_poll_service(uint32_t now) {
+  if (pcs_bridge_mode)
+    return; // DIP2 ON: чистий міст, жодних власних команд на шині
+  if ((int32_t)(now - hw_uart_ready_ms) < 0)
+    return; // §4.2: скан не раніше ~2 с після старту UART
+  if ((int32_t)(now - hw_next_slot_ms) < 0)
+    return; // міжкадрова пауза
+
+  uint8_t idx = hw_addr_idx;
+
+  if (!(pack_ever_seen_mask & (1u << idx))) {
+    // --- Невідома адреса: скан-проба (wake-up = FC03 0x0000 ×1, §4.1) ---
+    if (hw_probe_ms[idx] != 0 && (now - hw_probe_ms[idx]) < HW_PROBE_PERIOD_MS) {
+      hw_advance_addr(); // щойно пробувалась — наступна адреса
+      hw_next_slot_ms = now + HW_INTER_QUERY_MS;
+      return;
+    }
+    hw_probe_ms[idx] = now;
+    hw_send_query(idx, HW_Q_WAKE);
+    bms_receive_response(HW_QUERIES[HW_Q_WAKE].qty * 2 + 5);
+    uint8_t r = hw_parse_response(idx, HW_Q_WAKE);
+    if (r != 0) {
+      // Валідна відповідь будь-якого виду = модуль на шині (§4.1: критерій
+      // успіху — валідна відповідь взагалі, 0x0000 вже успіх).
+      last_bms_response_ms = millis();
+      hw_mod[idx].last_ok_ms = now;
+      sweep_seen_mask |= (1u << idx);
+      pack_ever_seen_mask |= (1u << idx); // → повна серія вже в цьому ж візиті
+      pack_miss_count[idx] = 0;
+      hw_q_idx = HW_Q_BASE;
+      hw_next_slot_ms = now + HW_INTER_QUERY_MS;
+      return;
+    }
+    hw_advance_addr(); // тиша/битий кадр — далі
+    hw_next_slot_ms = now + HW_INTER_QUERY_MS;
+    return;
+  }
+
+  // --- Відома модуль: черговий запит серії ---
+  hw_send_query(idx, hw_q_idx);
+  bms_receive_response(HW_QUERIES[hw_q_idx].qty * 2 + 5);
+  uint8_t r = hw_parse_response(idx, hw_q_idx);
+  if (r == 0) {
+    hw_advance_addr(); // таймаут/битий кадр: не тримати sweep, retry наступного
+    hw_next_slot_ms = now + HW_INTER_QUERY_MS;
+    return;
+  }
+
+  last_bms_response_ms = millis();
+  hw_mod[idx].last_ok_ms = now;
+  sweep_seen_mask |= (1u << idx);
+  pack_miss_count[idx] = 0;
+  if (r == 2)
+    hw_advance_addr(); // виняток: реєстр відхилено — решту серії не чіпаємо
+  else if (++hw_q_idx >= HW_Q_COUNT)
+    hw_advance_addr();
+  hw_next_slot_ms = now + HW_INTER_QUERY_MS;
 }
 
 static uint16_t calculate_charge_limit(uint8_t pack_count) {
@@ -1118,11 +1409,62 @@ static void agg_reset(void) {
   agg_current_sum = 0.0f;
   agg_soc_sum = 0;
   agg_soh_sum = 0;
+  agg_soh_min = 100; // §6: SOH агрегату = мінімум по модулях
   agg_temp_max = -1000.0f;
   agg_temp_min = 1000.0f;
   agg_count = 0;
   agg_max_cell_mv = 0;
   agg_min_cell_mv = 0xFFFF;
+}
+
+// Мапінг аварій Huawei → біти 0x359. Етап 2 Q17 (ERRORS_REFERENCE §7):
+// підмножина OV/UV/OT/UT/System error З фізичною перехресною перевіркою —
+// той самий стиль, що й Vision-парсер (ніколи не «сліпе» мапіння бітів).
+// Дискретні аварії (0x0048/0x004A: OC, anti-theft, внутрішнє OV тощо) лишаються
+// log-only у hw_mod.alarm до стенд-верифікації (§7.4 крок 3, Q17 етап 3).
+static void hw_map_alarms(void) {
+  for (uint8_t i = 0; i < 16; i++) {
+    if (!(hw_alarm_seen_mask & (1u << i)))
+      continue;
+    HwModule *m = &hw_mod[i];
+    uint16_t prot = m->alarm[2]; // 0x0048: захисти (§5.4)
+    uint16_t warn = m->alarm[3]; // 0x0049: попередження
+    uint16_t sysf = m->alarm[0]; // 0x0046: біти 1–6 = fault
+    uint16_t modst = m->alarm[4]; // 0x004A: біт0 shutdown, біт1 lithium fault
+
+    // Protection → 0x359 байти 0–1
+    if ((prot & (1u << 5)) && m->cell_max >= CELL_PHYSICAL_OV_CONFIRM_MV)
+      sweep_protect_b0 |= (CAN_PROT_CELL_OV | CAN_PROT_PACK_OV);
+    if ((prot & (1u << 4)) && m->pack_v >= 54.5f)
+      sweep_protect_b0 |= CAN_PROT_PACK_OV;
+    if ((prot & (1u << 7)) && (m->cell_min <= CELL_UV_WARN_MV || m->soc <= 5))
+      sweep_protect_b0 |= CAN_PROT_CELL_UV;
+    if ((prot & (1u << 6)) && m->pack_v <= 43.2f)
+      sweep_protect_b0 |= CAN_PROT_CELL_UV;
+    if ((prot & ((1u << 1) | (1u << 3) | (1u << 9))) &&
+        (float)m->t_max >= TEMP_DISCHARGE_MAX_C)
+      sweep_protect_b0 |= CAN_PROT_OT;
+    if ((prot & ((1u << 0) | (1u << 2))) &&
+        (float)m->t_min <= TEMP_DISCHARGE_MIN_C)
+      sweep_protect_b0 |= CAN_PROT_UT;
+    if ((sysf & 0x7E) || (modst & 0x0003))
+      sweep_protect_b1 |= CAN_PROT_SYSTEM_ERROR;
+
+    // Warning → 0x359 байти 2–3 (пом'якшені пороги, як у Vision)
+    if ((warn & (1u << 5)) && m->cell_max >= CELL_PHYSICAL_OV_WARN_CONFIRM_MV)
+      sweep_alarm_b2 |= (CAN_PROT_CELL_OV | CAN_PROT_PACK_OV);
+    if ((warn & (1u << 4)) && m->pack_v >= 54.0f)
+      sweep_alarm_b2 |= CAN_PROT_PACK_OV;
+    if ((warn & (1u << 7)) && (m->cell_min <= CELL_UV_WARN_MV || m->soc <= 10))
+      sweep_alarm_b2 |= CAN_PROT_CELL_UV;
+    if ((warn & (1u << 6)) && m->pack_v <= 44.0f)
+      sweep_alarm_b2 |= CAN_PROT_CELL_UV;
+    if ((warn & ((1u << 1) | (1u << 3))) && (float)m->t_max >= 50.0f)
+      sweep_alarm_b2 |= CAN_PROT_OT;
+    if ((warn & ((1u << 0) | (1u << 2))) &&
+        (float)m->t_min <= TEMP_DISCHARGE_MIN_C + 5.0f)
+      sweep_alarm_b2 |= CAN_PROT_UT;
+  }
 }
 
 static void bms_aggregate_data(void) {
@@ -1141,7 +1483,13 @@ static void bms_aggregate_data(void) {
       }
     }
   }
+
+  // Свіжі аварії саме цього sweep — у sweep_protect/sweep_alarm ДО їх латчу
+  // (інакше біти зависнуть до наступного вдалого aggregate).
+  hw_map_alarms();
   sweep_seen_mask = 0;
+  hw_base_seen_mask = 0;
+  hw_alarm_seen_mask = 0;
 
   if (agg_count == 0)
     return;
@@ -1151,7 +1499,7 @@ static void bms_aggregate_data(void) {
   bms_current = BMS_CURRENT_CHARGE_IS_POSITIVE ? -agg_current_sum
                                                : agg_current_sum;
   bms_soc = (uint8_t)(agg_soc_sum / agg_count);
-  bms_soh = (uint8_t)(agg_soh_sum / agg_count);
+  bms_soh = agg_soh_min; // §6: SOH = мінімум по модулях (найгірший)
   bms_temp = agg_temp_max / BMS_TEMP_RAW_DIV;
 
   // Latch sweep alarms and protection into active CAN frame registers
@@ -1312,7 +1660,7 @@ static void send_all_frames(void) {
 /* FWDGT — незалежний watchdog (LSI). SPL-джерела gd32f30x_fwdgt.c у проєкті нема,
  * тому регістри пишуться напряму. FWDGT_PSC_DIV256 + RLD 400 →
  * ≈3.13 с при LSI 32.768 кГц або ≈2.56 с при 40 кГц — запас над найгіршим
- * проходом циклу (прийом ≤500 мс + CAN ≤40 мс). Після старту не вимикається. */
+ * проходом циклу (Huawei-прийом ≤1 с + CAN ≤40 мс). Після старту не вимикається. */
 static void watchdog_init(void) {
   uint32_t spin;
   FWDGT_CTL = FWDGT_WRITEACCESS_ENABLE;
@@ -1385,12 +1733,13 @@ int main(void) {
   dip_charge_profile_init();
   leds_init();
   rs485_init();
+  // §4.2: старт скану Huawei-адрес не раніше ~2 с після старту UART
+  hw_uart_ready_ms = millis() + 2000;
   pcs_uart_init(); // PCS-485 port (mirror/bridge, mode from DIP2)
   can_init_500k();
   watchdog_init();
 
-  uint32_t last_bms = 0, last_can = 0, last_dip_poll = 0;
-  uint8_t current_addr_index = 0;
+  uint32_t last_can = 0, last_dip_poll = 0;
 
   while (1) {
     watchdog_feed();
@@ -1402,20 +1751,10 @@ int main(void) {
       pcs_mode_apply(dip_applied_code); // retry a DIP2 switch deferred by a busy bridge
       balance_led_tick(now);
     }
-    // Own BMS polls only in mirror mode — DIP2 ON is a pure bridge (no own
-    // commands on the battery line at all).
-    if (now - last_bms >= BMS_POLL_PERIOD_MS && !pcs_bridge_mode) {
-      last_bms = now;
-      bms_send_query(current_addr_index);
-      bms_receive_response();
-      if (bms_parse_response(current_addr_index + 1)) {
-        last_bms_response_ms = millis();
-      }
-      if (++current_addr_index >= 16) {
-        current_addr_index = 0;
-        bms_aggregate_data();
-      }
-    }
+    // Власний опит Huawei: серія запитів на відомі модулі + скан невідомих;
+    // DIP2 ON всередині hw_poll_service() — це чистий міст (без власних
+    // команд); міст орієнтований на Vision-формат і на Huawei-шині не застосовується.
+    hw_poll_service(now);
 
     // Pure bridge (DIP2 ON): relay inverter <-> BMS and keep CAN fed from the
     // same traffic (parse happens inside the step; aggregates close per sweep).

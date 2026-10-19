@@ -5,8 +5,10 @@
   1. Перевіряє CRC16 Modbus кадрів відповіді BMS (FC03, 83 байти).
   2. Декодує поля ТОЧНО за розкладом прошивки src/main.cpp :: bms_parse_response
      (зсуви байтів, масштаби, & 0xFF для SOC/SOH, знаковий струм).
-  3. Перевіряє CRC усіх 16 запитів BMS_QUERY_TABLE (таблиця витягується з
-     src/main.cpp, тож синхронізація з джерелом автоматична).
+  3. Перевіряє CRC усіх 16 запитів BMS_QUERY_TABLE: таблиця витягується з
+     src/main.cpp, якщо там є (головний проєкт); у клоні COMBOX_HUAWEI
+     (Huawei-драйвер, таблиці в джерелі немає) — використовується вбудована
+     фікстура Vision-запитів, до якої належать дампи у tools/dumps/.
   4. --selftest: будує синтетичний кадр зі значень, задокументованих у
      ANALYSIS.md (дамп 08.10.2026), і проганяє його через той самий парсер.
 
@@ -163,16 +165,43 @@ def print_frame(frame: bytes) -> None:
     print(f"  реєстр 0x24/0x25 {d['cell_count_reg']} / {d['pack_100ah_reg']}")
 
 
+# Vision V-LFP48100: FC03 0x0000 qty=39 (0x27) для адрес 0x01..0x10 — фікстура
+# дампів tools/dumps/. У головному проєкті таблиця витягується з src/main.cpp;
+# у клоні COMBOX_HUAWEI її там уже немає (Huawei-драйвер), тож CRC цих запитів
+# перевіряються проти вбудованої копії.
+VISION_QUERY_TABLE = [
+    [0x01, 0x03, 0x00, 0x00, 0x00, 0x27, 0x05, 0xD0],
+    [0x02, 0x03, 0x00, 0x00, 0x00, 0x27, 0x05, 0xE3],
+    [0x03, 0x03, 0x00, 0x00, 0x00, 0x27, 0x04, 0x32],
+    [0x04, 0x03, 0x00, 0x00, 0x00, 0x27, 0x05, 0x85],
+    [0x05, 0x03, 0x00, 0x00, 0x00, 0x27, 0x04, 0x54],
+    [0x06, 0x03, 0x00, 0x00, 0x00, 0x27, 0x04, 0x67],
+    [0x07, 0x03, 0x00, 0x00, 0x00, 0x27, 0x05, 0xB6],
+    [0x08, 0x03, 0x00, 0x00, 0x00, 0x27, 0x05, 0x49],
+    [0x09, 0x03, 0x00, 0x00, 0x00, 0x27, 0x04, 0x98],
+    [0x0A, 0x03, 0x00, 0x00, 0x00, 0x27, 0x04, 0xAB],
+    [0x0B, 0x03, 0x00, 0x00, 0x00, 0x27, 0x05, 0x7A],
+    [0x0C, 0x03, 0x00, 0x00, 0x00, 0x27, 0x04, 0xCD],
+    [0x0D, 0x03, 0x00, 0x00, 0x00, 0x27, 0x05, 0x1C],
+    [0x0E, 0x03, 0x00, 0x00, 0x00, 0x27, 0x05, 0x2F],
+    [0x0F, 0x03, 0x00, 0x00, 0x00, 0x27, 0x04, 0xFE],
+    [0x10, 0x03, 0x00, 0x00, 0x00, 0x27, 0x06, 0x91],
+]
+
+
 def verify_queries(src: str) -> int:
-    """Витягує BMS_QUERY_TABLE із src/main.cpp і перевіряє CRC кожного запиту."""
+    """Перевіряє CRC 16 Vision-запитів: з src/main.cpp або з фікстури."""
+    rows: list[list[str]] = []
     m = re.search(r"BMS_QUERY_TABLE\[16\]\[8\]\s*=\s*\{(.*?)\};", src, re.S)
-    if not m:
-        print("FAIL: BMS_QUERY_TABLE не знайдено в src/main.cpp")
-        return 1
-    rows = re.findall(r"\{([^}]+)\}", m.group(1))
-    if len(rows) != 16:
-        print(f"FAIL: у таблиці {len(rows)} рядків, очікувалося 16")
-        return 1
+    if m:
+        rows = re.findall(r"\{([^}]+)\}", m.group(1))
+        if len(rows) != 16:
+            print(f"FAIL: у таблиці {len(rows)} рядків, очікувалося 16")
+            return 1
+        print("джерело таблиці: src/main.cpp")
+    else:
+        rows = [", ".join("0x%02X" % b for b in row) for row in VISION_QUERY_TABLE]
+        print("джерело таблиці: вбудована фікстура VISION_QUERY_TABLE")
     fails = 0
     for row in rows:
         vals = [int(x, 16) for x in row.split(",")]
