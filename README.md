@@ -92,6 +92,7 @@ git clone https://github.com/figvam2050/COMBOX_HUAWEI.git
 | Файл | Призначення |
 |---|---|
 | [`README.md`](README.md) | Головний опис системи, архітектура, апаратура, швидкий старт |
+| [`USER_MANUAL.md`](USER_MANUAL.md) / [`.pdf`](USER_MANUAL.pdf) | **Інструкція користувача** (схема підключення, розпіновка кабелів, інвертор Deye, налаштування DIP, LED, troubleshooting) |
 | [`аналіз.md`](аналіз.md) | Повна технічна аналітика проєкту COMBOX_HUAWEI, дорожня карта обстеження |
 | [`HUAWEI_REFERENCE.md`](HUAWEI_REFERENCE.md) | База знань по батареях Huawei ESM: адресація, wake-up, мапа Modbus-реєстрів |
 | [`DEYE_CAN_RS485_BASE.md`](DEYE_CAN_RS485_BASE.md) | Еталон протоколів Deye CAN (Pylontech v2.0.6) та Modbus RTU інвертора |
