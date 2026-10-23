@@ -67,7 +67,7 @@ enum HwQueryId : uint8_t {
 };
 
 static const HwQuery HW_QUERIES[HW_Q_COUNT] = {
-    {0x0000, 1}, {0x0000, 7}, {0x000A, 1}, {0x0042, 2}, {0x0044, 2},
+    {0x0000, 7}, {0x0000, 7}, {0x000A, 1}, {0x0042, 2}, {0x0044, 2},
     {0x0046, 5}, {0x010F, 1}, {0x0012, 15}, {0x0022, 15},
 };
 
@@ -945,8 +945,6 @@ static uint8_t hw_parse_response(uint8_t addr_idx, uint8_t q) {
 
   switch (q) {
   case HW_Q_WAKE:
-    break; // проба наявності: дані (1 рег) не декодуємо
-
   case HW_Q_BASE: {
     // 0x0000 ×7: bus V, pack V, струм, SOC, SOH, t max, t min — усі ×0.01/°C
     m->bus_v = ((uint16_t)(d[0] << 8) | d[1]) * 0.01f;
@@ -1096,7 +1094,7 @@ static void hw_poll_service(uint32_t now) {
       sweep_seen_mask |= (1u << idx);
       pack_ever_seen_mask |= (1u << idx); // → повна серія вже в цьому ж візиті
       pack_miss_count[idx] = 0;
-      hw_q_idx = HW_Q_BASE;
+      hw_q_idx = HW_Q_STATE;
       hw_next_slot_ms = now + HW_INTER_QUERY_MS;
       return;
     }
