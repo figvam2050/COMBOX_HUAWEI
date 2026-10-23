@@ -98,14 +98,11 @@ git clone https://github.com/figvam2050/COMBOX_HUAWEI.git
 |---|---|
 | [`README.md`](README.md) | Головний опис системи, архітектура, апаратура, швидкий старт |
 | [`USER_MANUAL.md`](USER_MANUAL.md) / [`.pdf`](USER_MANUAL.pdf) | **Інструкція користувача** (схема підключення, розпіновка кабелів, інвертор Deye, налаштування DIP, LED, troubleshooting) |
-| [`аналіз.md`](аналіз.md) | Повна технічна аналітика проєкту COMBOX_HUAWEI, дорожня карта обстеження |
-| [`HUAWEI_REFERENCE.md`](HUAWEI_REFERENCE.md) | База знань по батареях Huawei ESM: адресація, wake-up, мапа Modbus-реєстрів (апаратно верифіковано наживо на ESM-48100U2 22.10.2026) |
+| [`COMMISSIONING_QA_ANALYSIS.md`](COMMISSIONING_QA_ANALYSIS.md) | **Звіт пусконалагодження та інженерний аналіз:** відповіді на запитання стендових тестів, розбір пакетів COM3, усунення тремтіння струму, 2-модульна оптимізація, таймінги, аварії та захисти |
+| [`HUAWEI_REFERENCE.md`](HUAWEI_REFERENCE.md) | База знань по батареях Huawei ESM: адресація, wake-up, мапа Modbus-реєстрів, аварії 0x0046..0x004A, таймінги |
+| [`BALANCE_AUTO.md`](BALANCE_AUTO.md) | Опис логіки авто-вирівнювання комірок та фінального мікрострумового дозаряду |
 | [`DEYE_CAN_RS485_BASE.md`](DEYE_CAN_RS485_BASE.md) | Еталон протоколів Deye CAN (Pylontech v2.0.6) та Modbus RTU інвертора |
 | [`PORT_MAPPING.md`](PORT_MAPPING.md) | Фізичні піни MCU GD32F305, продзвонювання плати (LED, DIP, UART, CAN) |
-| [`ERRORS_REFERENCE.md`](ERRORS_REFERENCE.md) | Довідник помилок: регістри 0x0046..0x004A, винятки Modbus, мапінг у CAN 0x359 |
-| [`IMPROVEMENTS_TODO.md`](IMPROVEMENTS_TODO.md) | Покроковий план завдань обстеження та введення в експлуатацію |
-| [`WHAT_NOT_TO_DO.md`](WHAT_NOT_TO_DO.md) | Інженерні заборони та правила безпеки (антипатерни) |
-| [`BALANCE_AUTO.md`](BALANCE_AUTO.md) | Опис логіки авто-вирівнювання комірок та фінального мікрострумового дозаряду |
 | [`can_sniffer/README.md`](can_sniffer/README.md) | Документація зовнішнього CAN-сніфера для тестування без інвертора |
 
 ---
