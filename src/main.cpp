@@ -45,6 +45,7 @@ static const uint8_t HW_ADDR[HW_MODULE_COUNT] = {
 
 #define HW_PROBE_PERIOD_MS 1500 // пауза між спробами скану відсутньої адреси
 #define HW_INTER_QUERY_MS 30    // ≥10 мс, рекомендовано 20–50 мс (§3, §7.3)
+#define HW_INTER_MODULE_MS 60   // пауза між модулями (§4.1: D7 мовчить, якщо лізти одразу після D6)
 
 typedef struct {
   uint16_t reg;
@@ -297,7 +298,7 @@ static uint8_t sweep_alarm_b3 = 0;
 
 // Multi-pack debounce (Q21): tolerate 10-20% RS485 packet loss without flapping limits
 static uint8_t pack_miss_count[16] = {0};
-static uint16_t pack_ever_seen_mask = 0;
+static uint16_t pack_ever_seen_mask = 0x0003; // D6 (214) та D7 (215) відомі одразу від старту
 static uint16_t sweep_seen_mask = 0;
 
 // --- Huawei ESM: буфер даних модулів (індекс 0..15 ↔ HW_ADDR) --------------
@@ -1099,7 +1100,7 @@ static void hw_poll_service(uint32_t now) {
       return;
     }
     hw_advance_addr(); // тиша/битий кадр — далі
-    hw_next_slot_ms = now + HW_INTER_QUERY_MS;
+    hw_next_slot_ms = now + HW_INTER_MODULE_MS;
     return;
   }
 
@@ -1109,7 +1110,7 @@ static void hw_poll_service(uint32_t now) {
   uint8_t r = hw_parse_response(idx, hw_q_idx);
   if (r == 0) {
     hw_advance_addr(); // таймаут/битий кадр: не тримати sweep, retry наступного
-    hw_next_slot_ms = now + HW_INTER_QUERY_MS;
+    hw_next_slot_ms = now + HW_INTER_MODULE_MS;
     return;
   }
 
@@ -1117,11 +1118,15 @@ static void hw_poll_service(uint32_t now) {
   hw_mod[idx].last_ok_ms = now;
   sweep_seen_mask |= (1u << idx);
   pack_miss_count[idx] = 0;
-  if (r == 2)
+  if (r == 2) {
     hw_advance_addr(); // виняток: реєстр відхилено — решту серії не чіпаємо
-  else if (++hw_q_idx >= HW_Q_COUNT)
+    hw_next_slot_ms = now + HW_INTER_MODULE_MS;
+  } else if (++hw_q_idx >= HW_Q_COUNT) {
     hw_advance_addr();
-  hw_next_slot_ms = now + HW_INTER_QUERY_MS;
+    hw_next_slot_ms = now + HW_INTER_MODULE_MS;
+  } else {
+    hw_next_slot_ms = now + HW_INTER_QUERY_MS;
+  }
 }
 
 static uint16_t calculate_charge_limit(uint8_t pack_count) {
