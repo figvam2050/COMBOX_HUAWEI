@@ -1429,7 +1429,7 @@ static void bms_aggregate_data(void) {
     } else if (pack_ever_seen_mask & (1 << i)) {
       if (pack_miss_count[i] < 255)
         pack_miss_count[i]++;
-      if (pack_miss_count[i] <= 5) {
+      if (pack_miss_count[i] <= 5 && hw_mod[i].last_ok_ms != 0) {
         active_pack_count++;
       } else if (pack_miss_count[i] >= 10) {
         pack_ever_seen_mask &= ~(1u << i);
