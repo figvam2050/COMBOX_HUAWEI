@@ -301,6 +301,14 @@ def build_pdf(filename="USER_MANUAL.pdf"):
         ('BOTTOMPADDING', (0, 0), (-1, -1), 4),
     ]))
     story.append(t_dip)
+    story.append(Spacer(1, 2 * mm))
+    story.append(Paragraph(
+        "<b>Автоматичне вирівнювання комірок (DIP1 = OFF):</b> шлюз автоматично призначає сесії заряду 54.0 В "
+        "з трікл-струмом 2.0 А/модуль при виявленні перекосу: розкид &ge; 100 мВ (HIGH) &rarr; кожні 24 год; "
+        "розкид 30&hellip;100 мВ (MED) &rarr; кожні 72 год (3 доби); розкид &lt; 30 мВ (OK) &rarr; кожні 30 діб. "
+        "Цільовий вихід &mdash; зведення розкиду до &le; 25 мВ.",
+        style_body
+    ))
 
     # Розділ 6: Світлодіоди
     story.append(Paragraph("6. Світлодіодна індикація (LED)", style_h1))
@@ -346,7 +354,7 @@ def build_pdf(filename="USER_MANUAL.pdf"):
     data_trouble = [
         headers_trouble,
         [Paragraph("<b>LED Running не світиться</b>", style_td_bold), Paragraph("Немає живлення на клемах B+/B−", style_td), Paragraph("Перевірте напругу батареї на гвинтовому клемнику (має бути 15–60 В) та запобіжник.", style_td)],
-        [Paragraph("<b>LED BMS-485 не блимає</b>", style_td_bold), Paragraph("Повна тиша на лінії RS485 або модуль спить", style_td), Paragraph("1. Перевірте полярність A/B (піни 6 та 5 RJ45) та спільний GND (пін 1).<br/>2. Зачекайте до 15 секунд для завершення процедури Wake-up сплячого модуля.", style_td)],
+        [Paragraph("<b>LED BMS-485 не блимає</b>", style_td_bold), Paragraph("Неправильна полярність або обрив кабелю", style_td), Paragraph("1. Перевірте розпіновку адаптерного кабелю (§2.1): Пін 6 (A) до 1+4 (T+/R+), Пін 5 (B) до 2+5 (T−/R−).<br/>2. Переконайтеся, що не увімкнено прямий кабель 1-в-1.<br/>3. Зачекайте до 15 секунд для завершення Wake-up сплячого модуля.", style_td)],
         [Paragraph("<b>Помилка F58 на інверторі</b>", style_td_bold), Paragraph("Немає зв'язку по CAN-шині", style_td), Paragraph("1. Перевірте патч-корд від PCS-CAN до гнізда BMS інвертора (піни 7 CAN-L, 8 CAN-H).<br/>2. Переконайтеся, що на Deye увімкнено Lithium Mode 00.", style_td)],
         [Paragraph("<b>Колізії на RS485 / невірна кількість модулів</b>", style_td_bold), Paragraph("Відсутній термінатор 120 Ом на COM_OUT", style_td), Paragraph("Встановіть резистор 120 Ом між пінами 7 і 8 роз'єму COM_OUT останнього блоку та перезапустіть живлення батарейного банку.", style_td)],
         [Paragraph("<b>Струм заряду впав до 0 А раніше 100%</b>", style_td_bold), Paragraph("Спрацював захисний тейпер за коміркою", style_td), Paragraph("Штатний алгоритм безпеки: найвища комірка досягла 3.60 В. Коробка захищає осередок від перенапруги. Зачекайте завершення вирівнювання.", style_td)],
