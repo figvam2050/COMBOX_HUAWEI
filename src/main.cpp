@@ -33,8 +33,8 @@
 #include <string.h>
 
 #define BMS_BAUDRATE 9600
-// Таймаут відповіді: 400 мс (як в інверторі Deye).
-#define BMS_TIMEOUT_MS 400
+// Таймаут відповіді: 600 мс (запас для важких відповідей Huawei ESM без ризику передчасного обриву).
+#define BMS_TIMEOUT_MS 600
 #define BMS_DEFAULT_TIMEOUT_MS 5000
 
 // --- Huawei ESM: опитування до 16 акумуляторів (0xD6–0xDD, 0xE0–0xE7 = 214–221, 224–231) ---
@@ -44,8 +44,9 @@ static const uint8_t HW_ADDR[HW_MODULE_COUNT] = {
     0xE0, 0xE1, 0xE2, 0xE3, 0xE4, 0xE5, 0xE6, 0xE7};
 
 #define HW_PROBE_PERIOD_MS 1500 // пауза між спробами скану відсутньої адреси
-#define HW_INTER_QUERY_MS 30    // ≥10 мс, рекомендовано 20–50 мс (§3, §7.3)
-#define HW_INTER_MODULE_MS 60   // пауза між модулями (§4.1: D7 мовчить, якщо лізти одразу після D6)
+#define HW_INTER_QUERY_MS 35    // пауза між регістрами одного модуля
+#define HW_INTER_MODULE_MS 150  // пауза між різними модулями (§4.1: заспокоєння шини перед D7)
+
 
 typedef struct {
   uint16_t reg;
@@ -1503,7 +1504,7 @@ static void hw_map_alarms(void) {
 }
 
 static void bms_aggregate_data(void) {
-  // Update pack presence with 3-miss debounce (Q21)
+  // Update pack presence with 5-miss debounce (Q21)
   uint8_t active_pack_count = 0;
   for (uint8_t i = 0; i < HW_MODULE_COUNT; i++) {
     if (sweep_seen_mask & (1 << i)) {
@@ -1513,7 +1514,7 @@ static void bms_aggregate_data(void) {
     } else if (pack_ever_seen_mask & (1 << i)) {
       if (pack_miss_count[i] < 255)
         pack_miss_count[i]++;
-      if (pack_miss_count[i] <= 2) {
+      if (pack_miss_count[i] <= 5) {
         active_pack_count++;
       } else if (pack_miss_count[i] >= 10) {
         pack_ever_seen_mask &= ~(1u << i);
@@ -1525,11 +1526,28 @@ static void bms_aggregate_data(void) {
   // (інакше біти зависнуть до наступного вдалого aggregate).
   hw_map_alarms();
   sweep_seen_mask = 0;
+
+  // Якщо активний модуль (в межах debounce <= 5) пропустив цей конкретний sweep,
+  // підхоплюємо його останню валідну телеметрію, щоб суми струмів, напруг та лімітів не смикались:
+  for (uint8_t i = 0; i < HW_MODULE_COUNT; i++) {
+    if (!(hw_base_seen_mask & (1u << i)) && (pack_ever_seen_mask & (1u << i)) &&
+        pack_miss_count[i] > 0 && pack_miss_count[i] <= 5 && hw_mod[i].pack_v > 40.0f) {
+      agg_voltage_sum += hw_mod[i].pack_v;
+      agg_current_sum += hw_mod[i].current;
+      agg_soc_sum += hw_mod[i].soc;
+      agg_soh_sum += hw_mod[i].soh;
+      if (hw_mod[i].soh < agg_soh_min)
+        agg_soh_min = hw_mod[i].soh;
+      agg_count++;
+    }
+  }
+
   hw_base_seen_mask = 0;
   hw_alarm_seen_mask = 0;
 
   if (agg_count == 0)
     return;
+
 
   bms_voltage = agg_voltage_sum / (float)agg_count;
   // Deye PCS CAN V3.3: 0x356 current is discharge positive, charge negative.
