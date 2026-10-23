@@ -732,6 +732,9 @@ static void hw_send_query(uint8_t addr_idx, uint8_t q) {
   }
   while (usart_flag_get(USART0, USART_FLAG_TC) == RESET)
     ;
+  // Flush any TX echo or line bounce after transmission finishes:
+  rs485_flush_rx();
+  uart_rx_index = 0;
 }
 
 // Прийом до expected_len байт: тиша BMS_TIMEOUT_MS (400 мс),
@@ -746,6 +749,8 @@ static uint16_t bms_receive_response(uint16_t expected_len) {
       break; // жорсткий дедлайн (шум не може тягнути прийом безкінечно)
     if (usart_flag_get(USART0, USART_FLAG_RBNE) != RESET) {
       uint8_t byte = usart_data_receive(USART0);
+      if (uart_rx_index == 0 && byte == 0x00)
+        continue; // відсікаємо брязкіт лінії при переході передавача
       pcs_mirror_push(byte); // no-op in bridge mode
       if (uart_rx_index < sizeof(uart_rx_buffer)) {
         uart_rx_buffer[uart_rx_index++] = byte;
