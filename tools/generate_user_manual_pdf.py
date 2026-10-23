@@ -310,8 +310,46 @@ def build_pdf(filename="USER_MANUAL.pdf"):
         style_body
     ))
 
-    # Розділ 6: Світлодіоди
-    story.append(Paragraph("6. Світлодіодна індикація (LED)", style_h1))
+    # Розділ 6: Система аварійних захистів та CAN
+    story.append(Paragraph("6. Система аварійних захистів та взаємодія з інвертором Deye", style_h1))
+    story.append(Paragraph(
+        "Шлюз COM-Box реалізує багаторівневий механізм збору та фізичної верифікації аварійних станів батарей, "
+        "що усуває хибні спрацьовування та гарантує збереження обладнання:<br/>"
+        "• <b>Аварійна діагностика (регістри 0x0046–0x004A):</b> кожен цикл опитування зчитує 5 слів діагностики: "
+        "апаратні збої плати BMS/датчиків/MOSFET (0x0046), дефекти осередків (0x0047), апаратні захисти OV/UV/OT/UT/SC (0x0048), "
+        "ранні попередження (0x0049) та струмові перевантаження (0x004A).<br/>"
+        "• <b>Фізична перехресна верифікація (Cross-Validation):</b> прапорці передаються в CAN тільки якщо біт захисту активний "
+        "в BMS <b>ТА</b> підтверджується фізичними вимірами (Cell OV при U<sub>cell</sub> &ge; 3600 мВ, Pack OV при U<sub>pack</sub> &ge; 54.5 В, "
+        "Cell UV при U<sub>cell</sub> &le; 2800 мВ). Це виключає хибні аварійні зупинки інвертора.<br/>"
+        "• <b>Зимовий температурний захист:</b> при температурі &lt; +2 °C заряд літію блокується (CCL = 0 А, Charge Enable = 0), "
+        "але аварійний біт UT у 0x359 не виставляється, щоб Deye не знеструмив будинок (розряд дозволений до &minus;20 °C).",
+        style_body
+    ))
+
+    headers_alarm = [Paragraph("CAN ID", style_th), Paragraph("Кадр / Сигнал", style_th), Paragraph("Відображення аварії в CAN", style_th), Paragraph("Реакція інвертора Deye", style_th)]
+    data_alarm = [
+        headers_alarm,
+        [Paragraph("<b>0x359</b>", style_td_bold), Paragraph("Protection & Alarms", style_td), Paragraph("Байт 0: захисти (OV, UV, OT, UT, OC)<br/>Байт 1: Charge OC, System Error<br/>Байти 2–3: дзеркало Warning", style_td), Paragraph("Відображає тривожні піктограми, записує подію в системний журнал алярмів.", style_td)],
+        [Paragraph("<b>0x351</b>", style_td_bold), Paragraph("Limits (CCL / DCL)", style_td), Paragraph("CCL = 0 А (заборона заряду)<br/>DCL = 0 А (заборона розряду)", style_td), Paragraph("Миттєво припиняє генерацію або заряд за мікросекунди без різких ударів по контакторах.", style_td)],
+        [Paragraph("<b>0x35C</b>", style_td_bold), Paragraph("Request Flags", style_td), Paragraph("Bit 7 (0x80 Charge Enable) = 0<br/>Bit 6 (0x40 Discharge Enable) = 0", style_td), Paragraph("Апаратна заборона роботи інвертора за відповідним силовим напрямком.", style_td)],
+        [Paragraph("<b>0x355</b>", style_td_bold), Paragraph("SOC Mirror (Off-Grid)", style_td), Paragraph("При забороні розряду: SOC = 0%<br/>При забороні заряду: SOC = 100%", style_td), Paragraph("Спеціальний захист для Deye: в автономному режимі гарантовано припиняє розряд/заряд.", style_td)],
+    ]
+    t_alarm = Table(data_alarm, colWidths=[22 * mm, 42 * mm, 55 * mm, 55 * mm])
+    t_alarm.setStyle(TableStyle([
+        ('BACKGROUND', (0, 0), (-1, 0), c_primary),
+        ('TEXTCOLOR', (0, 0), (-1, 0), colors.white),
+        ('ALIGN', (0, 0), (-1, -1), 'LEFT'),
+        ('VALIGN', (0, 0), (-1, -1), 'TOP'),
+        ('GRID', (0, 0), (-1, -1), 0.5, colors.HexColor("#CBD5E1")),
+        ('ROWBACKGROUNDS', (0, 1), (-1, -1), [colors.white, c_bg_box]),
+        ('TOPPADDING', (0, 0), (-1, -1), 4),
+        ('BOTTOMPADDING', (0, 0), (-1, -1), 4),
+    ]))
+    story.append(t_alarm)
+    story.append(Spacer(1, 2 * mm))
+
+    # Розділ 7: Світлодіоди
+    story.append(Paragraph("7. Світлодіодна індикація (LED)", style_h1))
     story.append(Paragraph("Стан системи відображається 5 світлодіодами:", style_body))
 
     headers_led = [Paragraph("Світлодіод", style_th), Paragraph("Колір / Розташування", style_th), Paragraph("Нормальний стан", style_th), Paragraph("Значення та діагностика", style_th)]
@@ -336,8 +374,8 @@ def build_pdf(filename="USER_MANUAL.pdf"):
     ]))
     story.append(t_led)
 
-    # Розділ 7: Діагностика
-    story.append(Paragraph("7. Діагностика та зняття логів через порт PCS-485 (Дзеркало)", style_h1))
+    # Розділ 8: Діагностика
+    story.append(Paragraph("8. Діагностика та зняття логів через порт PCS-485 (Дзеркало)", style_h1))
     story.append(Paragraph(
         "При положенні <b>DIP2 = OFF</b> порт <b>PCS-485</b> транслює повну копію всього обміну між коробкою та акумуляторами "
         "(запити Modbus FC03 та сирі відповіді батарей). Це дозволяє логувати роботу без втручання в кабель BMS:<br/>"
@@ -347,8 +385,8 @@ def build_pdf(filename="USER_MANUAL.pdf"):
         style_body
     ))
 
-    # Розділ 8: Troubleshooting
-    story.append(Paragraph("8. Пошук та усунення несправностей (Troubleshooting)", style_h1))
+    # Розділ 9: Troubleshooting
+    story.append(Paragraph("9. Пошук та усунення несправностей (Troubleshooting)", style_h1))
 
     headers_trouble = [Paragraph("Симптом", style_th), Paragraph("Ймовірна причина", style_th), Paragraph("Спосіб вирішення", style_th)]
     data_trouble = [
@@ -358,6 +396,7 @@ def build_pdf(filename="USER_MANUAL.pdf"):
         [Paragraph("<b>Помилка F58 на інверторі</b>", style_td_bold), Paragraph("Немає зв'язку по CAN-шині", style_td), Paragraph("1. Перевірте патч-корд від PCS-CAN до гнізда BMS інвертора (піни 7 CAN-L, 8 CAN-H).<br/>2. Переконайтеся, що на Deye увімкнено Lithium Mode 00.", style_td)],
         [Paragraph("<b>Колізії на RS485 / невірна кількість модулів</b>", style_td_bold), Paragraph("Відсутній термінатор 120 Ом на COM_OUT", style_td), Paragraph("Встановіть резистор 120 Ом між пінами 7 і 8 роз'єму COM_OUT останнього блоку та перезапустіть живлення батарейного банку.", style_td)],
         [Paragraph("<b>Струм заряду впав до 0 А раніше 100%</b>", style_td_bold), Paragraph("Спрацював захисний тейпер за коміркою", style_td), Paragraph("Штатний алгоритм безпеки: найвища комірка досягла 3.60 В. Коробка захищає осередок від перенапруги. Зачекайте завершення вирівнювання.", style_td)],
+        [Paragraph("<b>Струм заряду показує 40/100 А замість 80/200 А</b>", style_td_bold), Paragraph("Один з двох модулів вимкнений або втратив зв'язок", style_td), Paragraph("Штатний дебаунс: через 5 секунд тиші COM-Box автоматично перемикається в безпечний режим 1 АКБ (40/50 А заряд, 100 А розряд). Після ввімкнення ліміти відновлюються автоматично протягом 1 секунди.", style_td)],
     ]
     t_trouble = Table(data_trouble, colWidths=[38 * mm, 46 * mm, 90 * mm])
     t_trouble.setStyle(TableStyle([
@@ -372,8 +411,8 @@ def build_pdf(filename="USER_MANUAL.pdf"):
     ]))
     story.append(t_trouble)
 
-    # Розділ 9: Правовий статус
-    story.append(Paragraph("9. Правовий статус та безпека", style_h1))
+    # Розділ 10: Правовий статус
+    story.append(Paragraph("10. Правовий статус та безпека", style_h1))
     story.append(Paragraph(
         "• <b>Ліцензія CC BY-NC-SA 4.0:</b> Прошивка та документація є відкритими для вільного некомерційного використання "
         "(домашні СЕС, освітні та DIY цілі). Будь-який комерційний продаж пристроїв із цією прошивкою або платне надання послуг — <b>категорично заборонені</b>.<br/>"
