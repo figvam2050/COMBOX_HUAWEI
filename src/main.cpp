@@ -33,20 +33,16 @@
 #include <string.h>
 
 #define BMS_BAUDRATE 9600
-// Таймаут відповіді: 600 мс (запас для важких відповідей Huawei ESM без ризику передчасного обриву).
-#define BMS_TIMEOUT_MS 600
+// Таймаут відповіді: 400 мс (за нормальної відповіді 114 мс це 3.5-кратний запас)
+#define BMS_TIMEOUT_MS 400
 #define BMS_DEFAULT_TIMEOUT_MS 5000
 
-// --- Huawei ESM: опитування до 16 акумуляторів (0xD6–0xDD, 0xE0–0xE7 = 214–221, 224–231) ---
-#define HW_MODULE_COUNT 16
-static const uint8_t HW_ADDR[HW_MODULE_COUNT] = {
-    0xD6, 0xD7, 0xD8, 0xD9, 0xDA, 0xDB, 0xDC, 0xDD,
-    0xE0, 0xE1, 0xE2, 0xE3, 0xE4, 0xE5, 0xE6, 0xE7};
+// --- Huawei ESM: опитування строго 2 акумуляторів (0xD6 = 214, 0xD7 = 215) ---
+#define HW_MODULE_COUNT 2
+static const uint8_t HW_ADDR[HW_MODULE_COUNT] = {0xD6, 0xD7};
 
-#define HW_PROBE_PERIOD_MS 1500 // пауза між спробами скану відсутньої адреси
-#define HW_INTER_QUERY_MS 35    // пауза між регістрами одного модуля
-#define HW_INTER_MODULE_MS 150  // пауза між різними модулями (§4.1: заспокоєння шини перед D7)
-
+#define HW_INTER_QUERY_MS 30   // пауза між регістрами одного модуля (30 мс)
+#define HW_INTER_MODULE_MS 80  // пауза між модулями D6 -> D7 (80 мс)
 
 typedef struct {
   uint16_t reg;
@@ -54,24 +50,16 @@ typedef struct {
 } HwQuery;
 
 enum HwQueryId : uint8_t {
-  HW_Q_WAKE = 0, // 0x0000 ×1: wake-up/проба наявності (§4.1) — лише для скану
-  HW_Q_BASE,     // 0x0000 ×7: bus V, pack V, струм, SOC, SOH, t max, t min
-  HW_Q_STATE,    // 0x000A ×1: стан модуля (0 Charge … 3 Free)
-  HW_Q_CYCLES,   // 0x0042 ×2: цикли розряду, U32 BE
-  HW_Q_AH,       // 0x0044 ×2: накопичений розряд Ah, U32 BE
-  HW_Q_ALARM,    // 0x0046 ×5: аварійні слова 0x0046..0x004A
-  HW_Q_NCELL,    // 0x010F ×1: кількість комірок
-  HW_Q_TEMP,     // 0x0012 ×15: температури комірок S16 °C
-  HW_Q_CELL,     // 0x0022 ×15: напруги комірок U16 мВ
+  HW_Q_BASE = 0, // 0x0000 ×7: bus V, pack V, струм, SOC, SOH, t max, t min
+  HW_Q_ALARM,    // 0x0046 ×5: аварійні слова 0x0046..0x004A (захисти та попередження)
+  HW_Q_CELL,     // 0x0022 ×15: напруги 15 комірок, U16 мВ BE
   HW_Q_COUNT
-  // 0x100B/0x100D (ліміти ×0.001 C) — відкладено (HUAWEI_REFERENCE §8, Q5);
-  // CCL/DCL на цьому етапі задаються профілями від DIP (40 А / 50 А на модуль).
 };
 
 static const HwQuery HW_QUERIES[HW_Q_COUNT] = {
-    {0x0000, 7}, {0x0000, 7}, {0x000A, 1}, {0x0042, 2}, {0x0044, 2},
-    {0x0046, 5}, {0x010F, 1}, {0x0012, 15}, {0x0022, 15},
+    {0x0000, 7}, {0x0046, 5}, {0x0022, 15},
 };
+
 
 
 static uint16_t modbus_crc16(const uint8_t *data, uint16_t len) {
@@ -298,11 +286,11 @@ static uint8_t sweep_alarm_b2 = 0;
 static uint8_t sweep_alarm_b3 = 0;
 
 // Multi-pack debounce (Q21): tolerate 10-20% RS485 packet loss without flapping limits
-static uint8_t pack_miss_count[16] = {0};
+static uint8_t pack_miss_count[HW_MODULE_COUNT] = {0};
 static uint16_t pack_ever_seen_mask = 0x0003; // D6 (214) та D7 (215) відомі одразу від старту
 static uint16_t sweep_seen_mask = 0;
 
-// --- Huawei ESM: буфер даних модулів (індекс 0..15 ↔ HW_ADDR) --------------
+// --- Huawei ESM: буфер даних модулів (індекс 0..1 ↔ HW_ADDR) --------------
 // У агрегат ідуть лише модулі, чия відповідь потрапила у sweep: базові суми
 // дедуплікуються hw_base_seen_mask (клітинки/температури/аварії — ідемпотентні).
 typedef struct {
@@ -325,17 +313,14 @@ typedef struct {
   uint32_t last_ok_ms;   // остання валідна відповідь (будь-який запит)
 } HwModule;
 
-static HwModule hw_mod[16];
+static HwModule hw_mod[HW_MODULE_COUNT];
 static uint16_t hw_base_seen_mask = 0;  // базові суми цього sweep уже погоджені
 static uint16_t hw_alarm_seen_mask = 0; // свіжі аварійні слова для мапінгу 0x359
 static uint8_t agg_soh_min = 100;       // §6: SOH агрегату = мінімум по модулях
 
-// Машина станів опиту: адреса × запит; скан відсутніх — ≥3 с на адресу (§4.1),
-// старт скану — +2 с після старту UART (§4.2).
 static uint8_t hw_addr_idx = 0;
 static uint8_t hw_q_idx = 0;
 static uint32_t hw_next_slot_ms = 0;
-static uint32_t hw_probe_ms[16] = {0}; // 0 = ще не пробували
 static uint32_t hw_uart_ready_ms = 0;
 
 static uint16_t charge_voltage_limit = CHARGE_VOLTAGE_LIMIT_STATIC;
@@ -480,6 +465,8 @@ static void rs485_flush_rx(void) {
 #define BR_SWEEP_MAX_MS 15000UL // inverter loop ≈13 s for 16 addrs @ ~400 ms
 
 static void watchdog_feed(void);
+static void send_all_frames(void);
+static uint32_t last_can = 0;
 static bool bms_parse_response(uint8_t expected_addr); // Legacy 83-byte frame (DIP2 bridge test path)
 static void bms_aggregate_data(void);
 static void agg_reset(void);
@@ -946,7 +933,6 @@ static uint8_t hw_parse_response(uint8_t addr_idx, uint8_t q) {
   const volatile uint8_t *d = &uart_rx_buffer[3]; // початок даних FC03
 
   switch (q) {
-  case HW_Q_WAKE:
   case HW_Q_BASE: {
     // 0x0000 ×7: bus V, pack V, струм, SOC, SOH, t max, t min — усі ×0.01/°C
     m->bus_v = ((uint16_t)(d[0] << 8) | d[1]) * 0.01f;
@@ -960,8 +946,7 @@ static uint8_t hw_parse_response(uint8_t addr_idx, uint8_t q) {
     m->soh = (uint8_t)soh;
     m->t_max = t_max;
     m->t_min = t_min;
-    // Базові суми — один раз на sweep на модуль (hw_base_seen_mask, бо
-    // sweep_seen_mask виставляється вже на першому успішному запиті).
+    // Базові суми — один раз на sweep на модуль
     if (!(hw_base_seen_mask & (1u << addr_idx))) {
       hw_base_seen_mask |= (1u << addr_idx);
       agg_voltage_sum += m->pack_v; // §6: середнє по модулях
@@ -979,41 +964,10 @@ static uint8_t hw_parse_response(uint8_t addr_idx, uint8_t q) {
     break;
   }
 
-  case HW_Q_STATE:
-    m->state = (uint8_t)((uint16_t)(d[0] << 8) | d[1]); // 0..3, §7.2 п.4
-    break;
-
-  case HW_Q_CYCLES:
-    m->cycles = ((uint32_t)d[0] << 24) | ((uint32_t)d[1] << 16) |
-                ((uint32_t)d[2] << 8) | d[3]; // U32 BE, §5.3
-    break;
-
-  case HW_Q_AH:
-    m->ah = ((uint32_t)d[0] << 24) | ((uint32_t)d[1] << 16) |
-            ((uint32_t)d[2] << 8) | d[3]; // U32 BE, §5.3
-    break;
-
   case HW_Q_ALARM:
     for (uint8_t i = 0; i < 5; i++)
       m->alarm[i] = (uint16_t)(d[i * 2] << 8) | d[i * 2 + 1]; // 0x0046..0x004A
     hw_alarm_seen_mask |= (1u << addr_idx); // мапінг у 0x359 — у aggregate()
-    break;
-
-  case HW_Q_NCELL:
-    m->ncell = (uint8_t)((uint16_t)(d[0] << 8) | d[1]); // 15 у ESM-48100
-    break;
-
-  case HW_Q_TEMP: // 0x0012 ×15: S16 °C, саніті -40..120 (відсікає 0x7FFF)
-    for (uint8_t i = 0; i < 15; i++) {
-      int16_t t = (int16_t)((uint16_t)(d[i * 2] << 8) | d[i * 2 + 1]);
-      m->cell_temp[i] = t;
-      if (t >= -40 && t <= 120) {
-        if ((float)t > agg_temp_max)
-          agg_temp_max = (float)t;
-        if ((float)t < agg_temp_min)
-          agg_temp_min = (float)t;
-      }
-    }
     break;
 
   case HW_Q_CELL: { // 0x0022 ×15: U16 мВ
@@ -1035,6 +989,7 @@ static uint8_t hw_parse_response(uint8_t addr_idx, uint8_t q) {
     break;
   }
 
+
   default:
     return 0;
   }
@@ -1042,75 +997,34 @@ static uint8_t hw_parse_response(uint8_t addr_idx, uint8_t q) {
   return 1;
 }
 
-static bool probed_unknown_this_sweep = false;
-
 static void hw_advance_addr(void) {
   hw_q_idx = HW_Q_BASE;
   if (++hw_addr_idx >= HW_MODULE_COUNT) {
     hw_addr_idx = 0;
-    probed_unknown_this_sweep = false;
-    bms_aggregate_data(); // sweep закрито: агрегація + мапінг аварій (§6)
+    bms_aggregate_data(); // Обидва акумулятори опитані -> агрегація та формування CAN відповіді
   }
 }
 
-// Машина станів опиту Huawei ESM (неблокуючий FSM):
-//  - модуль із pack_ever_seen_mask — повна серія HW_QUERIES, пауза
-//    HW_INTER_QUERY_MS між кадрами (§7.3: 20–50 мс);
-//  - невідома адреса — тільки скан-проба wake-up не частіше
-//    HW_PROBE_PERIOD_MS (≥3 с, §4.1), старт — після hw_uart_ready_ms (§4.2);
-//  - будь-яка валідна відповідь (дані чи виняток) оновлює
-//    last_bms_response_ms (fail-closed Q5) і sweep_seen_mask (присутність);
-//  - таймаут/битий кадр → перехід на НАСТУПНУ АДРЕСУ: мертвий модуль з'їдає
-//    не більше ніж один слот на sweep, а 3-miss debounce (Q21) вилучає його
-//    приблизно за 15 с (§6) за типового темпу sweep.
+// Машина станів опиту строго 2 модулів Huawei ESM (D6 = 214 та D7 = 215):
+//  - кожен модуль опитується 3 ключовими реєстрами (BASE, ALARM, CELL);
+//  - після завершення циклу по обох акумуляторах bms_aggregate_data() одразу
+//    відправляє агреговані дані в CAN шину;
+//  - швидкість повного циклу становить ~1.0–1.1 секунди, синхронно з вимогами Deye CAN.
 static void hw_poll_service(uint32_t now) {
   if (pcs_bridge_mode)
     return; // DIP2 ON: чистий міст, жодних власних команд на шині
   if ((int32_t)(now - hw_uart_ready_ms) < 0)
-    return; // §4.2: скан не раніше ~2 с після старту UART
+    return; // старт після запуску UART
   if ((int32_t)(now - hw_next_slot_ms) < 0)
     return; // міжкадрова пауза
 
   uint8_t idx = hw_addr_idx;
 
-  if (!(pack_ever_seen_mask & (1u << idx))) {
-    // --- Невідома адреса: скан-проба (wake-up = FC03 0x0000 ×1, §4.1) ---
-    // Якщо у цьому sweep вже пробувалась невідома адреса або пауза ще не минула —
-    // одразу пропускаємо без затримки, щоб не гальмувати зв'язок з активними модулями.
-    if (probed_unknown_this_sweep ||
-        (hw_probe_ms[idx] != 0 && (now - hw_probe_ms[idx]) < HW_PROBE_PERIOD_MS)) {
-      hw_advance_addr(); // щойно пробувалась або вже була проба у цьому sweep — далі
-      hw_next_slot_ms = now; // без зайвої паузи
-      return;
-    }
-    probed_unknown_this_sweep = true;
-    hw_probe_ms[idx] = now;
-    hw_send_query(idx, HW_Q_WAKE);
-    bms_receive_response(HW_QUERIES[HW_Q_WAKE].qty * 2 + 5);
-    uint8_t r = hw_parse_response(idx, HW_Q_WAKE);
-    if (r != 0) {
-      // Валідна відповідь будь-якого виду = модуль на шині (§4.1: критерій
-      // успіху — валідна відповідь взагалі, 0x0000 вже успіх).
-      last_bms_response_ms = millis();
-      hw_mod[idx].last_ok_ms = now;
-      sweep_seen_mask |= (1u << idx);
-      pack_ever_seen_mask |= (1u << idx); // → повна серія вже в цьому ж візиті
-      pack_miss_count[idx] = 0;
-      hw_q_idx = HW_Q_STATE;
-      hw_next_slot_ms = now + HW_INTER_QUERY_MS;
-      return;
-    }
-    hw_advance_addr(); // тиша/битий кадр — далі
-    hw_next_slot_ms = now + HW_INTER_MODULE_MS;
-    return;
-  }
-
-  // --- Відома модуль: черговий запит серії ---
   hw_send_query(idx, hw_q_idx);
   bms_receive_response(HW_QUERIES[hw_q_idx].qty * 2 + 5);
   uint8_t r = hw_parse_response(idx, hw_q_idx);
   if (r == 0) {
-    hw_advance_addr(); // таймаут/битий кадр: не тримати sweep, retry наступного
+    hw_advance_addr(); // таймаут/битий кадр: не затримувати опит
     hw_next_slot_ms = now + HW_INTER_MODULE_MS;
     return;
   }
@@ -1119,11 +1033,12 @@ static void hw_poll_service(uint32_t now) {
   hw_mod[idx].last_ok_ms = now;
   sweep_seen_mask |= (1u << idx);
   pack_miss_count[idx] = 0;
+
   if (r == 2) {
-    hw_advance_addr(); // виняток: реєстр відхилено — решту серії не чіпаємо
+    hw_advance_addr(); // виняток Modbus: перехід до наступного модуля
     hw_next_slot_ms = now + HW_INTER_MODULE_MS;
   } else if (++hw_q_idx >= HW_Q_COUNT) {
-    hw_advance_addr();
+    hw_advance_addr(); // всі регістри модуля прочитано
     hw_next_slot_ms = now + HW_INTER_MODULE_MS;
   } else {
     hw_next_slot_ms = now + HW_INTER_QUERY_MS;
@@ -1579,6 +1494,10 @@ static void bms_aggregate_data(void) {
   // Set data valid now that fresh aggregated values are computed
   bms_data_valid = true;
 
+  // Формуємо та надсилаємо агреговану відповідь у CAN шину ТІЛЬКИ ПІСЛЯ збору та агрегації даних від обох акумуляторів
+  send_all_frames();
+  last_can = millis();
+
   agg_reset();
 }
 
@@ -1798,12 +1717,13 @@ int main(void) {
   leds_init();
   rs485_init();
   // §4.2: старт скану Huawei-адрес не раніше ~2 с після старту UART
-  hw_uart_ready_ms = millis() + 2000;
+  // Старт опиту Huawei через 500 мс після старту UART
+  hw_uart_ready_ms = millis() + 500;
   pcs_uart_init(); // PCS-485 port (mirror/bridge, mode from DIP2)
   can_init_500k();
   watchdog_init();
 
-  uint32_t last_can = 0, last_dip_poll = 0;
+  uint32_t last_dip_poll = 0;
 
   while (1) {
     watchdog_feed();
@@ -1815,7 +1735,7 @@ int main(void) {
       pcs_mode_apply(dip_applied_code); // retry a DIP2 switch deferred by a busy bridge
       balance_led_tick(now);
     }
-    // Власний опит Huawei: серія запитів на відомі модулі + скан невідомих;
+    // Власний опит Huawei: опитування строго двох акумуляторів (0xD6 та 0xD7);
     // DIP2 ON всередині hw_poll_service() — це міст (без власних
     // команд; для промислової роботи DIP2 завжди вимкнено — дзеркало).
     hw_poll_service(now);
@@ -1853,9 +1773,15 @@ int main(void) {
       sweep_alarm_b3 = 0;
     }
 
-    if (now - last_can >= 1000) {
+    // Fallback keepalive: якщо зв'язок RS485 раптом замовк більше ніж на 2000 мс (обрив),
+    // періодично підтримуємо CAN шину.
+    // За нормальної роботи CAN-кадри надсилаються з bms_aggregate_data() одразу
+    // після завершення опитування та агрегації даних від обох акумуляторів.
+    if (now - last_can >= 2000) {
       last_can = now;
-      send_all_frames();
+      if (bms_data_valid || (millis() - last_bms_response_ms > BMS_DEFAULT_TIMEOUT_MS)) {
+        send_all_frames();
+      }
     }
 
     // LED4 (PC5, CAN): release ~100 ms after the last CAN burst.
