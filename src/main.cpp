@@ -158,8 +158,8 @@ static uint16_t modbus_crc16(const uint8_t *data, uint16_t len) {
 #define BAL_SESSION_MAX_MS (8UL * 3600UL * 1000UL)
 #define BAL_START_I_MAX_A 1.0f     // start only when not discharging
 #define BAL_OUTAGE_I_MIN_A 1.5f    // sustained discharge -> abort session
-#define BAL_OUTAGE_AGG_N 19        // ~60 s at one aggregate per 3.2 s (full poll cycle)
-#define BAL_EXIT_STREAK 3          // consecutive aggregates with spread <= exit
+#define BAL_OUTAGE_AGG_N 60        // ~60 s при швидкості циклу ~1.0 с на агрегат
+#define BAL_EXIT_STREAK 5          // 5 поспіль циклів зі спредом <= 25 мВ (~5 с) для фіксації успіху
 #define BAL_TEMP_MIN_C 0.0f
 #define BAL_TEMP_MAX_C 45.0f
 #define BAL_HIST_HOURS 24          // hourly spread history for trend
