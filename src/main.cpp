@@ -33,20 +33,15 @@
 #include <string.h>
 
 #define BMS_BAUDRATE 9600
-// HUAWEI_REFERENCE.md §3: таймаут відповіді 500 мс мінімум (активний модуль
-// відповідає за 45–90 мс; тиша = відсутня адреса або сплячий модуль).
-#define BMS_TIMEOUT_MS 500
-#define BMS_DEFAULT_TIMEOUT_MS 4000
+// Таймаут відповіді: 400 мс (як в інверторі Deye).
+#define BMS_TIMEOUT_MS 400
+#define BMS_DEFAULT_TIMEOUT_MS 5000
 
-// --- Huawei ESM: адреси модулів і серія запитів (§7.2 п.1, §9) -------------
-// Скан: <addr> 03 00 00 00 01 <CRC> — wake-up і проба наявності; старт
-// скану не раніше ніж через ~2 с після старту UART (§4.2), повтори для
-// відсутніх адрес не частіше ніж раз на 3 с (§4.1).
-static const uint8_t HW_ADDR[16] = {0xD6, 0xD7, 0xD8, 0xD9, 0xDA, 0xDB,
-                                    0xDC, 0xDD, 0xE0, 0xE1, 0xE2, 0xE3,
-                                    0xE4, 0xE5, 0xE6, 0xE7};
+// --- Huawei ESM: опитування виключно 2 акумуляторів (0xD6 = 214, 0xD7 = 215) ---
+#define HW_MODULE_COUNT 2
+static const uint8_t HW_ADDR[HW_MODULE_COUNT] = {0xD6, 0xD7};
 
-#define HW_PROBE_PERIOD_MS 3000 // пауза між спробами скану однієї адреси
+#define HW_PROBE_PERIOD_MS 1500 // пауза між спробами скану відсутньої адреси
 #define HW_INTER_QUERY_MS 30    // ≥10 мс, рекомендовано 20–50 мс (§3, §7.3)
 
 typedef struct {
@@ -735,9 +730,11 @@ static void hw_send_query(uint8_t addr_idx, uint8_t q) {
     rs485_send_byte(frame[i]);
     pcs_mirror_push(frame[i]); // no-op in bridge mode
   }
+  while (usart_flag_get(USART0, USART_FLAG_TC) == RESET)
+    ;
 }
 
-// Прийом до expected_len байт: тиша BMS_TIMEOUT_MS (500 мс — мінімум §3),
+// Прийом до expected_len байт: тиша BMS_TIMEOUT_MS (400 мс),
 // достроковий стоп на повному кадрі або на кадрі винятку Modbus (5 Б).
 static uint16_t bms_receive_response(uint16_t expected_len) {
   uart_rx_index = 0;
@@ -745,7 +742,7 @@ static uint16_t bms_receive_response(uint16_t expected_len) {
   uint32_t wait_start = start_ms;
   while (millis() - wait_start < BMS_TIMEOUT_MS) {
     pcs_poll_service(millis()); // mirror drain / inverter RX while we wait
-    if (millis() - start_ms >= BMS_TIMEOUT_MS + 500)
+    if (millis() - start_ms >= BMS_TIMEOUT_MS + 200)
       break; // жорсткий дедлайн (шум не може тягнути прийом безкінечно)
     if (usart_flag_get(USART0, USART_FLAG_RBNE) != RESET) {
       uint8_t byte = usart_data_receive(USART0);
@@ -1040,7 +1037,7 @@ static uint8_t hw_parse_response(uint8_t addr_idx, uint8_t q) {
 
 static void hw_advance_addr(void) {
   hw_q_idx = HW_Q_BASE;
-  if (++hw_addr_idx >= 16) {
+  if (++hw_addr_idx >= HW_MODULE_COUNT) {
     hw_addr_idx = 0;
     bms_aggregate_data(); // sweep закрито: агрегація + мапінг аварій (§6)
   }
@@ -1432,7 +1429,7 @@ static void agg_reset(void) {
 // Дискретні аварії (0x0048/0x004A: OC, anti-theft, внутрішнє OV тощо) лишаються
 // log-only у hw_mod.alarm до стенд-верифікації на реальному обладнанні.
 static void hw_map_alarms(void) {
-  for (uint8_t i = 0; i < 16; i++) {
+  for (uint8_t i = 0; i < HW_MODULE_COUNT; i++) {
     if (!(hw_alarm_seen_mask & (1u << i)))
       continue;
     HwModule *m = &hw_mod[i];
@@ -1479,7 +1476,7 @@ static void hw_map_alarms(void) {
 static void bms_aggregate_data(void) {
   // Update pack presence with 3-miss debounce (Q21)
   uint8_t active_pack_count = 0;
-  for (uint8_t i = 0; i < 16; i++) {
+  for (uint8_t i = 0; i < HW_MODULE_COUNT; i++) {
     if (sweep_seen_mask & (1 << i)) {
       pack_ever_seen_mask |= (1 << i);
       pack_miss_count[i] = 0;
