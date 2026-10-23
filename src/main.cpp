@@ -37,9 +37,11 @@
 #define BMS_TIMEOUT_MS 400
 #define BMS_DEFAULT_TIMEOUT_MS 5000
 
-// --- Huawei ESM: опитування виключно 2 акумуляторів (0xD6 = 214, 0xD7 = 215) ---
-#define HW_MODULE_COUNT 2
-static const uint8_t HW_ADDR[HW_MODULE_COUNT] = {0xD6, 0xD7};
+// --- Huawei ESM: опитування до 16 акумуляторів (0xD6–0xDD, 0xE0–0xE7 = 214–221, 224–231) ---
+#define HW_MODULE_COUNT 16
+static const uint8_t HW_ADDR[HW_MODULE_COUNT] = {
+    0xD6, 0xD7, 0xD8, 0xD9, 0xDA, 0xDB, 0xDC, 0xDD,
+    0xE0, 0xE1, 0xE2, 0xE3, 0xE4, 0xE5, 0xE6, 0xE7};
 
 #define HW_PROBE_PERIOD_MS 1500 // пауза між спробами скану відсутньої адреси
 #define HW_INTER_QUERY_MS 30    // ≥10 мс, рекомендовано 20–50 мс (§3, §7.3)
@@ -1040,10 +1042,13 @@ static uint8_t hw_parse_response(uint8_t addr_idx, uint8_t q) {
   return 1;
 }
 
+static bool probed_unknown_this_sweep = false;
+
 static void hw_advance_addr(void) {
   hw_q_idx = HW_Q_BASE;
   if (++hw_addr_idx >= HW_MODULE_COUNT) {
     hw_addr_idx = 0;
+    probed_unknown_this_sweep = false;
     bms_aggregate_data(); // sweep закрито: агрегація + мапінг аварій (§6)
   }
 }
@@ -1070,11 +1075,15 @@ static void hw_poll_service(uint32_t now) {
 
   if (!(pack_ever_seen_mask & (1u << idx))) {
     // --- Невідома адреса: скан-проба (wake-up = FC03 0x0000 ×1, §4.1) ---
-    if (hw_probe_ms[idx] != 0 && (now - hw_probe_ms[idx]) < HW_PROBE_PERIOD_MS) {
-      hw_advance_addr(); // щойно пробувалась — наступна адреса
-      hw_next_slot_ms = now + HW_INTER_QUERY_MS;
+    // Якщо у цьому sweep вже пробувалась невідома адреса або пауза ще не минула —
+    // одразу пропускаємо без затримки, щоб не гальмувати зв'язок з активними модулями.
+    if (probed_unknown_this_sweep ||
+        (hw_probe_ms[idx] != 0 && (now - hw_probe_ms[idx]) < HW_PROBE_PERIOD_MS)) {
+      hw_advance_addr(); // щойно пробувалась або вже була проба у цьому sweep — далі
+      hw_next_slot_ms = now; // без зайвої паузи
       return;
     }
+    probed_unknown_this_sweep = true;
     hw_probe_ms[idx] = now;
     hw_send_query(idx, HW_Q_WAKE);
     bms_receive_response(HW_QUERIES[HW_Q_WAKE].qty * 2 + 5);
@@ -1503,6 +1512,8 @@ static void bms_aggregate_data(void) {
         pack_miss_count[i]++;
       if (pack_miss_count[i] <= 2) {
         active_pack_count++;
+      } else if (pack_miss_count[i] >= 10) {
+        pack_ever_seen_mask &= ~(1u << i);
       }
     }
   }
