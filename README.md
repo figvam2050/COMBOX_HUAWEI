@@ -28,7 +28,8 @@ git clone https://github.com/figvam2050/COMBOX_HUAWEI.git
 4. **Діагностика шини:**
    - Пасивний RS485-сніфер батарейної лінії: `tools/rs485_sniff.py`
    - Зовнішній CAN-сніфер для ESP32 / Arduino Nano: папка `can_sniffer/`
-5. **Еталони знань з правами read-only:** `DEYE_CAN_RS485_BASE.md` та `PORT_MAPPING.md` захищені `chmod 444`. Для редагування: `chmod 644 <файл>` → правка → `chmod 444 <файл>`.
+5. **Еталон знань Deye:** `DEYE_CAN_RS485_BASE.md` містить повну специфікацію протоколів CAN (Pylontech v2.0.6) та Modbus RTU інвертора.
+6. **Готові прошивки:** папка `compiled_firmware/` містить скомпільовані бінарні файли `firmware.bin` та `firmware.hex` для швидкої прошивки через ST-Link (адреса `0x08000000`).
 
 ---
 
@@ -99,11 +100,8 @@ git clone https://github.com/figvam2050/COMBOX_HUAWEI.git
 | [`README.md`](README.md) | Головний опис системи, архітектура, апаратура, швидкий старт |
 | [`USER_MANUAL.md`](USER_MANUAL.md) / [`.pdf`](USER_MANUAL.pdf) | **Інструкція користувача** (схема підключення, розпіновка кабелів, інвертор Deye, налаштування DIP, LED, troubleshooting) |
 | [`COMMISSIONING_QA_ANALYSIS.md`](COMMISSIONING_QA_ANALYSIS.md) | **Звіт пусконалагодження та інженерний аналіз:** відповіді на запитання стендових тестів, розбір пакетів COM3, усунення тремтіння струму, 2-модульна оптимізація, таймінги, аварії та захисти |
-| [`HUAWEI_REFERENCE.md`](HUAWEI_REFERENCE.md) | База знань по батареях Huawei ESM: адресація, wake-up, мапа Modbus-реєстрів, аварії 0x0046..0x004A, таймінги |
 | [`BALANCE_AUTO.md`](BALANCE_AUTO.md) | Опис логіки авто-вирівнювання комірок та фінального мікрострумового дозаряду |
 | [`DEYE_CAN_RS485_BASE.md`](DEYE_CAN_RS485_BASE.md) | Еталон протоколів Deye CAN (Pylontech v2.0.6) та Modbus RTU інвертора |
-| [`PORT_MAPPING.md`](PORT_MAPPING.md) | Фізичні піни MCU GD32F305, продзвонювання плати (LED, DIP, UART, CAN) |
-| [`can_sniffer/README.md`](can_sniffer/README.md) | Документація зовнішнього CAN-сніфера для тестування без інвертора |
 
 ---
 
