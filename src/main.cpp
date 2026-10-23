@@ -1167,7 +1167,19 @@ static uint16_t calculate_discharge_limit(uint8_t pack_count) {
   uint32_t max_current_x10 =
       (uint32_t)DISCHARGE_CURRENT_LIMIT_PER_PACK_X10 * pack_count;
 
-  if (agg_min_cell_mv == 0xFFFF)
+  uint16_t min_cell = agg_min_cell_mv;
+  if (min_cell == 0xFFFF) {
+    for (uint8_t i = 0; i < HW_MODULE_COUNT; i++) {
+      if (hw_mod[i].cell_min > 0 && hw_mod[i].cell_min < min_cell) {
+        min_cell = hw_mod[i].cell_min;
+      }
+    }
+  }
+  if (min_cell == 0xFFFF && bms_voltage > 40.0f) {
+    min_cell = (uint16_t)((bms_voltage / 15.0f) * 1000.0f);
+  }
+
+  if (min_cell == 0xFFFF)
     return 0;
 
   // Temperature cut-offs for discharge (-20°C .. +60°C) with hysteresis
@@ -1185,10 +1197,10 @@ static uint16_t calculate_discharge_limit(uint8_t pack_count) {
   }
 
   // Cell voltage cut-off: hard cut <= 2650 mV, re-enable >= 3000 mV
-  if (agg_min_cell_mv <= CELL_DISCHARGE_STOP_MV) {
+  if (min_cell <= CELL_DISCHARGE_STOP_MV) {
     discharge_cell_uv_inhibit = true;
   } else if (discharge_cell_uv_inhibit) {
-    if (agg_min_cell_mv >= CELL_DISCHARGE_REENABLE_MV) {
+    if (min_cell >= CELL_DISCHARGE_REENABLE_MV) {
       discharge_cell_uv_inhibit = false;
     }
   }
@@ -1198,12 +1210,12 @@ static uint16_t calculate_discharge_limit(uint8_t pack_count) {
   }
 
   // Soft cut / Cell UV warning (<= 2800 mV): derate discharge current to 50%
-  if (agg_min_cell_mv <= CELL_UV_WARN_MV) {
+  if (min_cell <= CELL_UV_WARN_MV) {
     max_current_x10 /= 2;
   }
 
   // Severe cell imbalance check (> 400 mV delta): derate to 50%
-  if (agg_max_cell_mv > agg_min_cell_mv && (agg_max_cell_mv - agg_min_cell_mv) > CELL_MAX_DELTA_MV) {
+  if (agg_max_cell_mv > min_cell && (agg_max_cell_mv - min_cell) > CELL_MAX_DELTA_MV) {
     max_current_x10 /= 2;
   }
 
