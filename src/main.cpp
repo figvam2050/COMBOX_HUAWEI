@@ -89,7 +89,7 @@ static uint16_t modbus_crc16(const uint8_t *data, uint16_t len) {
 #define CHARGE_CURRENT_LIMIT_DEFAULT 0
 #define DISCHARGE_CURRENT_LIMIT_DEFAULT 0
 
-#define CHARGE_VOLTAGE_LIMIT_STATIC 540
+#define CHARGE_VOLTAGE_LIMIT_STATIC 532 // 53.2 V (3.546 V/cell * 15): Victron/Pylontech 15S profile
 #define CHARGE_VOLTAGE_LIMIT_DIP90 518
 // Per-pack charge current limit, selected by DIP5 (see DIP_CHARGE_CURRENT_50A):
 // OFF = 40 A (soft margin), ON = 50 A (battery manufacturer maximum).
