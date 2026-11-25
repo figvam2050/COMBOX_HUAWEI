@@ -51,13 +51,18 @@ typedef struct {
 
 enum HwQueryId : uint8_t {
   HW_Q_BASE = 0, // 0x0000 ×7: bus V, pack V, струм, SOC, SOH, t max, t min
-  HW_Q_ALARM,    // 0x0046 ×5: аварійні слова 0x0046..0x004A (захисти та попередження)
+  HW_Q_ALARM,    // 0x0042 ×9: cycles (0x0042..43), ah (0x0044..45), alarm[0..4] (0x0046..4A)
   HW_Q_CELL,     // 0x0022 ×15: напруги 15 комірок, U16 мВ BE
+  HW_Q_FAST_COUNT,
+  HW_Q_CELL_TEMP = HW_Q_FAST_COUNT, // 0x0012 ×15: температури 15 комірок
+  HW_Q_SYS_INFO, // 0x0100 ×15: версії ПЗ/апаратури, кількість комірок
+  HW_Q_MODEL,    // 0x0332 ×12: модель акумулятора (ESM-48100U2)
   HW_Q_COUNT
 };
 
 static const HwQuery HW_QUERIES[HW_Q_COUNT] = {
-    {0x0000, 7}, {0x0046, 5}, {0x0022, 15},
+    {0x0000, 7}, {0x0042, 9}, {0x0022, 15},
+    {0x0012, 15}, {0x0100, 15}, {0x0332, 12},
 };
 
 
@@ -182,12 +187,27 @@ static uint16_t modbus_crc16(const uint8_t *data, uint16_t len) {
 // reg19 temperature raw divisor: 1 = reg 0x13 holds whole C (dump 08.10.2026).
 #define BMS_TEMP_RAW_DIV 1.0f
 
+#define CAN_PROTOCOL_DEYE_V33 1
+
 #define CAN_ID_LIMITS 0x351
 #define CAN_ID_SOC 0x355
 #define CAN_ID_STATUS 0x356
 #define CAN_ID_PROTECT 0x359
 #define CAN_ID_FLAGS 0x35C
 #define CAN_ID_BRAND 0x35E
+#define CAN_ID_CELL_EXTREMES 0x361
+#define CAN_ID_DEYE_CFG 0x363
+#define CAN_ID_DEYE_PACK_COUNT 0x364
+#define CAN_ID_GRID_LIMITS 0x371
+#define CAN_ID_DEYE_PACK_STATUS_BASE 0x110
+#define CAN_ID_DEYE_PACK_VI_BASE 0x150
+#define CAN_ID_DEYE_PACK_CELL_BASE 0x200
+#define CAN_ID_DEYE_PACK_CYCLES_BASE 0x400
+#define CAN_ID_DEYE_PACK_FW_BASE 0x500
+#define CAN_ID_DEYE_PACK_MODEL_BASE 0x600
+#define CAN_ID_DEYE_PACK_SER_BASE 0x650
+#define CAN_ID_INV_HEARTBEAT 0x305U
+#define INVERTER_CAN_TIMEOUT_MS 10000U
 
 #define UART_BMS USART0
 #define UART_BMS_RCU RCU_USART0
@@ -284,6 +304,15 @@ static uint8_t sweep_protect_b0 = 0;
 static uint8_t sweep_protect_b1 = 0;
 static uint8_t sweep_alarm_b2 = 0;
 static uint8_t sweep_alarm_b3 = 0;
+
+// 0x359 Deye PCS CAN V3.3 Tables 1-7 active bytes and sweep accumulators
+static uint8_t can_dy_p0 = 0, can_dy_p1 = 0, can_dy_p2 = 0, can_dy_p3 = 0;
+static uint8_t can_dy_a4 = 0, can_dy_a5 = 0, can_dy_e6 = 0;
+static uint8_t sweep_dy_p0 = 0, sweep_dy_p1 = 0, sweep_dy_p2 = 0, sweep_dy_p3 = 0;
+static uint8_t sweep_dy_a4 = 0, sweep_dy_a5 = 0, sweep_dy_e6 = 0;
+
+static uint32_t last_inverter_can_rx_ms = 0;
+static bool inverter_can_alive = false;
 
 // Multi-pack debounce (Q21): tolerate 10-20% RS485 packet loss without flapping limits
 static uint8_t pack_miss_count[HW_MODULE_COUNT] = {0};
@@ -965,8 +994,12 @@ static uint8_t hw_parse_response(uint8_t addr_idx, uint8_t q) {
   }
 
   case HW_Q_ALARM:
+    m->cycles = ((uint32_t)d[0] << 24) | ((uint32_t)d[1] << 16) |
+                ((uint32_t)d[2] << 8) | d[3]; // 0x0042–0x0043 U32 BE
+    m->ah = ((uint32_t)d[4] << 24) | ((uint32_t)d[5] << 16) |
+            ((uint32_t)d[6] << 8) | d[7];     // 0x0044–0x0045 U32 BE
     for (uint8_t i = 0; i < 5; i++)
-      m->alarm[i] = (uint16_t)(d[i * 2] << 8) | d[i * 2 + 1]; // 0x0046..0x004A
+      m->alarm[i] = (uint16_t)(d[(i + 4) * 2] << 8) | d[(i + 4) * 2 + 1]; // 0x0046..0x004A
     hw_alarm_seen_mask |= (1u << addr_idx); // мапінг у 0x359 — у aggregate()
     break;
 
@@ -989,6 +1022,18 @@ static uint8_t hw_parse_response(uint8_t addr_idx, uint8_t q) {
     break;
   }
 
+
+  case HW_Q_CELL_TEMP: // 0x0012 ×15: температури комірок
+    for (uint8_t i = 0; i < 15; i++)
+      m->cell_temp[i] = (int16_t)((uint16_t)(d[i * 2] << 8) | d[i * 2 + 1]);
+    break;
+
+  case HW_Q_SYS_INFO: // 0x0100 ×15: версії та кількість комірок (0x010F)
+    m->ncell = (uint8_t)(((uint16_t)(d[14 * 2] << 8) | d[14 * 2 + 1]) & 0xFFU);
+    break;
+
+  case HW_Q_MODEL: // 0x0332 ×12: модель (транслюється в PCS-485 дзеркало)
+    break;
 
   default:
     return 0;
@@ -1037,9 +1082,24 @@ static void hw_poll_service(uint32_t now) {
   if (r == 2) {
     hw_advance_addr(); // виняток Modbus: перехід до наступного модуля
     hw_next_slot_ms = now + HW_INTER_MODULE_MS;
-  } else if (++hw_q_idx >= HW_Q_COUNT) {
-    hw_advance_addr(); // всі регістри модуля прочитано
+  } else if (hw_q_idx >= HW_Q_FAST_COUNT) {
+    // Повільний запит завершено — переходимо до наступного модуля
+    hw_advance_addr();
     hw_next_slot_ms = now + HW_INTER_MODULE_MS;
+  } else if (++hw_q_idx >= HW_Q_FAST_COUNT) {
+    // Раз на ~10 циклів додаємо один повільний запит для повного моніторингу на PCS-485
+    static uint8_t slow_tick = 0;
+    static uint8_t slow_q = HW_Q_CELL_TEMP;
+    if (++slow_tick >= 10) {
+      slow_tick = 0;
+      hw_q_idx = slow_q;
+      if (++slow_q >= HW_Q_COUNT)
+        slow_q = HW_Q_CELL_TEMP;
+      hw_next_slot_ms = now + HW_INTER_QUERY_MS;
+    } else {
+      hw_advance_addr(); // всі швидкі регістри модуля прочитано
+      hw_next_slot_ms = now + HW_INTER_MODULE_MS;
+    }
   } else {
     hw_next_slot_ms = now + HW_INTER_QUERY_MS;
   }
@@ -1383,38 +1443,68 @@ static void hw_map_alarms(void) {
     uint16_t sysf = m->alarm[0]; // 0x0046: біти 1–6 = fault
     uint16_t modst = m->alarm[4]; // 0x004A: біт0 shutdown, біт1 lithium fault
 
-    // Protection → 0x359 байти 0–1
-    if ((prot & (1u << 5)) && m->cell_max >= CELL_PHYSICAL_OV_CONFIRM_MV)
+    // Protection → 0x359 байти 0–1 (Pylontech) + Tables 1-4 (Deye V3.3)
+    if ((prot & (1u << 5)) && m->cell_max >= CELL_PHYSICAL_OV_CONFIRM_MV) {
       sweep_protect_b0 |= (CAN_PROT_CELL_OV | CAN_PROT_PACK_OV);
-    if ((prot & (1u << 4)) && m->pack_v >= 54.5f)
+      sweep_dy_p0 |= (0x01U | 0x04U); // T1: Cell OV | Module OV
+    }
+    if ((prot & (1u << 4)) && m->pack_v >= 54.5f) {
       sweep_protect_b0 |= CAN_PROT_PACK_OV;
-    if ((prot & (1u << 7)) && (m->cell_min <= CELL_UV_WARN_MV || m->soc <= 5))
+      sweep_dy_p0 |= 0x04U; // T1: Module OV
+    }
+    if ((prot & (1u << 7)) && (m->cell_min <= CELL_UV_WARN_MV || m->soc <= 5)) {
       sweep_protect_b0 |= CAN_PROT_CELL_UV;
-    if ((prot & (1u << 6)) && m->pack_v <= 43.2f)
+      sweep_dy_p0 |= 0x02U; // T1: Cell UV
+    }
+    if ((prot & (1u << 6)) && m->pack_v <= 43.2f) {
       sweep_protect_b0 |= CAN_PROT_CELL_UV;
+      sweep_dy_p0 |= 0x08U; // T1: Module UV
+    }
     if ((prot & ((1u << 1) | (1u << 3) | (1u << 9))) &&
-        (float)m->t_max >= TEMP_DISCHARGE_MAX_C)
+        (float)m->t_max >= TEMP_DISCHARGE_MAX_C) {
       sweep_protect_b0 |= CAN_PROT_OT;
+      sweep_dy_p0 |= 0x40U; // T1: Charge OT
+      sweep_dy_p1 |= 0x10U; // T2: Discharge OT
+    }
     if ((prot & ((1u << 0) | (1u << 2))) &&
-        (float)m->t_min <= TEMP_DISCHARGE_MIN_C)
+        (float)m->t_min <= TEMP_DISCHARGE_MIN_C) {
       sweep_protect_b0 |= CAN_PROT_UT;
-    if ((sysf & 0x7E) || (modst & 0x0003))
+      sweep_dy_p0 |= 0x80U; // T1: Charge UT
+      sweep_dy_p1 |= 0x20U; // T2: Discharge UT
+    }
+    if ((sysf & 0x7E) || (modst & 0x0003)) {
       sweep_protect_b1 |= CAN_PROT_SYSTEM_ERROR;
+      sweep_dy_e6 |= 0x01U; // T7: System Error
+    }
 
-    // Warning → 0x359 байти 2–3 (пороги раннього попередження)
-    if ((warn & (1u << 5)) && m->cell_max >= CELL_PHYSICAL_OV_WARN_CONFIRM_MV)
+    // Warning → 0x359 байти 2–3 (Pylontech) + Tables 5-6 (Deye V3.3)
+    if ((warn & (1u << 5)) && m->cell_max >= CELL_PHYSICAL_OV_WARN_CONFIRM_MV) {
       sweep_alarm_b2 |= (CAN_PROT_CELL_OV | CAN_PROT_PACK_OV);
-    if ((warn & (1u << 4)) && m->pack_v >= 54.0f)
+      sweep_dy_a4 |= (0x01U | 0x04U); // T5: Cell HV | Module HV
+    }
+    if ((warn & (1u << 4)) && m->pack_v >= 54.0f) {
       sweep_alarm_b2 |= CAN_PROT_PACK_OV;
-    if ((warn & (1u << 7)) && (m->cell_min <= CELL_UV_WARN_MV || m->soc <= 10))
+      sweep_dy_a4 |= 0x04U; // T5: Module HV
+    }
+    if ((warn & (1u << 7)) && (m->cell_min <= CELL_UV_WARN_MV || m->soc <= 10)) {
       sweep_alarm_b2 |= CAN_PROT_CELL_UV;
-    if ((warn & (1u << 6)) && m->pack_v <= 44.0f)
+      sweep_dy_a4 |= 0x02U; // T5: Cell LV
+    }
+    if ((warn & (1u << 6)) && m->pack_v <= 44.0f) {
       sweep_alarm_b2 |= CAN_PROT_CELL_UV;
-    if ((warn & ((1u << 1) | (1u << 3))) && (float)m->t_max >= 50.0f)
+      sweep_dy_a4 |= 0x08U; // T5: Module LV
+    }
+    if ((warn & ((1u << 1) | (1u << 3))) && (float)m->t_max >= 50.0f) {
       sweep_alarm_b2 |= CAN_PROT_OT;
+      sweep_dy_a4 |= 0x40U; // T5: Charge HT
+      sweep_dy_a5 |= 0x10U; // T6: Discharge HT
+    }
     if ((warn & ((1u << 0) | (1u << 2))) &&
-        (float)m->t_min <= TEMP_DISCHARGE_MIN_C + 5.0f)
+        (float)m->t_min <= TEMP_DISCHARGE_MIN_C + 5.0f) {
       sweep_alarm_b2 |= CAN_PROT_UT;
+      sweep_dy_a4 |= 0x80U; // T5: Charge LT
+      sweep_dy_a5 |= 0x20U; // T6: Discharge LT
+    }
   }
 }
 
@@ -1482,6 +1572,16 @@ static void bms_aggregate_data(void) {
   sweep_alarm_b2 = 0;
   sweep_alarm_b3 = 0;
 
+  can_dy_p0 = sweep_dy_p0;
+  can_dy_p1 = sweep_dy_p1;
+  can_dy_p2 = sweep_dy_p2;
+  can_dy_p3 = sweep_dy_p3;
+  can_dy_a4 = sweep_dy_a4;
+  can_dy_a5 = sweep_dy_a5;
+  can_dy_e6 = sweep_dy_e6;
+  sweep_dy_p0 = sweep_dy_p1 = sweep_dy_p2 = sweep_dy_p3 = 0;
+  sweep_dy_a4 = sweep_dy_a5 = sweep_dy_e6 = 0;
+
   uint8_t effective_packs = (active_pack_count > 0) ? active_pack_count : agg_count;
   bms_pack_count = effective_packs;
 
@@ -1543,11 +1643,11 @@ static bool can_mailbox_free(void) {
          (can_flag_get(DEYE_CAN, CAN_FLAG_TME2) == SET);
 }
 
-static void send_can_std(uint32_t id, const uint8_t *data, uint8_t len) {
+static bool send_can_std(uint32_t id, const uint8_t *data, uint8_t len) {
   uint32_t wait_start = millis();
   while (!can_mailbox_free()) {
     if (millis() - wait_start >= 5)
-      return; // скриньки зайняті (немає ACK) — кидати кадр
+      return false; // скриньки зайняті (немає ACK) — кидати кадр
   }
 
   can_transmit_message_struct tx_msg;
@@ -1561,12 +1661,30 @@ static void send_can_std(uint32_t id, const uint8_t *data, uint8_t len) {
 
   uint8_t mbox = can_message_transmit(DEYE_CAN, &tx_msg);
   if (mbox == CAN_NOMAILBOX)
-    return;
+    return false;
 
   uint32_t tx_start = millis();
   while (can_transmit_states(DEYE_CAN, mbox) == CAN_TRANSMIT_PENDING) {
     if (millis() - tx_start >= 3)
-      return;
+      return false;
+  }
+  return true;
+}
+
+// Drain CAN_FIFO0 to prevent hardware FIFO overflow and track inverter 0x305 heartbeat.
+static void can_rx_service(uint32_t now) {
+  uint8_t pending = can_receive_message_length_get(DEYE_CAN, CAN_FIFO0);
+  while (pending > 0) {
+    can_receive_message_struct rx_msg;
+    can_message_receive(DEYE_CAN, CAN_FIFO0, &rx_msg);
+    if (rx_msg.rx_ff == CAN_FF_STANDARD && rx_msg.rx_sfid == CAN_ID_INV_HEARTBEAT) {
+      last_inverter_can_rx_ms = now;
+      inverter_can_alive = true;
+    }
+    pending = can_receive_message_length_get(DEYE_CAN, CAN_FIFO0);
+  }
+  if (inverter_can_alive && (now - last_inverter_can_rx_ms > INVERTER_CAN_TIMEOUT_MS)) {
+    inverter_can_alive = false;
   }
 }
 
@@ -1579,14 +1697,98 @@ static void put_u16le(uint8_t *data, uint16_t value) {
   data[1] = (uint8_t)((value >> 8) & 0xFF);
 }
 
+#if CAN_PROTOCOL_DEYE_V33
+static bool send_deye_pack_identity(uint8_t idx) {
+  uint8_t data[8];
+  static const uint8_t fw[8] = {0x20, 0x08, 0xAA, 'V', '5', '.', '1', '8'};
+  static const uint8_t model[8] = {'E', 'S', 'M', '4', '8', '1', '0', '0'};
+  if (!send_can_std((uint32_t)(CAN_ID_DEYE_PACK_FW_BASE + idx), fw, 8))
+    return false;
+  if (!send_can_std((uint32_t)(CAN_ID_DEYE_PACK_MODEL_BASE + idx), model, 8))
+    return false;
+
+  uint8_t pack_num = (uint8_t)(idx + 1U);
+  data[0] = 'H';
+  data[1] = 'W';
+  data[2] = '0';
+  data[3] = '0';
+  data[4] = '0';
+  data[5] = '0';
+  data[6] = (uint8_t)('0' + (pack_num / 10U));
+  data[7] = (uint8_t)('0' + (pack_num % 10U));
+  return send_can_std((uint32_t)(CAN_ID_DEYE_PACK_SER_BASE + idx), data, 8);
+}
+
+static void send_deye_per_pack_frames(void) {
+  static uint32_t tx_cycle = 0;
+  static uint8_t slow_cursor = 0;
+  tx_cycle++;
+
+  uint8_t data[8];
+  uint8_t online_indices[HW_MODULE_COUNT];
+  uint8_t online_count = 0;
+
+  for (uint8_t i = 0; i < HW_MODULE_COUNT; i++) {
+    if (hw_mod[i].last_ok_ms == 0)
+      continue;
+    online_indices[online_count++] = i;
+    const HwModule *m = &hw_mod[i];
+    bool protect_active = ((m->alarm[0] & 0x7E) != 0) || ((m->alarm[4] & 0x0003) != 0);
+
+    // 0x110+i: Pack relay/status flag (byte 7: 0x01=online | 0x10=CHG_OK | 0x20=DSG_OK; 0x00=protect)
+    memset(data, 0, 8);
+    data[7] = protect_active
+                  ? 0x00U
+                  : (uint8_t)(0x01U | (!charge_cell_ov_inhibit && !charge_temp_inhibit ? 0x10U : 0U) |
+                              (!discharge_cell_uv_inhibit && !discharge_temp_inhibit ? 0x20U : 0U));
+    if (!send_can_std((uint32_t)(CAN_ID_DEYE_PACK_STATUS_BASE + i), data, 8))
+      return;
+
+    // 0x150+i: V (0.1 V), I (0.1 A, discharge positive / charge negative), SOC (0.1%), SOH (0.1%)
+    uint16_t v_01v = (uint16_t)round_to_i16(m->pack_v * 10.0f);
+    int16_t cur_01a = (int16_t)round_to_i16(-m->current * 10.0f);
+    put_u16le(&data[0], v_01v);
+    put_u16le(&data[2], (uint16_t)cur_01a);
+    put_u16le(&data[4], (uint16_t)m->soc * 10U);
+    put_u16le(&data[6], (uint16_t)m->soh * 10U);
+    if (!send_can_std((uint32_t)(CAN_ID_DEYE_PACK_VI_BASE + i), data, 8))
+      return;
+
+    // 0x200+i: CellMax (mV), CellMin (mV), Tmax (0.1 C), Tmin (0.1 C)
+    put_u16le(&data[0], m->cell_max);
+    put_u16le(&data[2], m->cell_min);
+    put_u16le(&data[4], (uint16_t)(m->t_max * 10));
+    put_u16le(&data[6], (uint16_t)(m->t_min * 10));
+    if (!send_can_std((uint32_t)(CAN_ID_DEYE_PACK_CELL_BASE + i), data, 8))
+      return;
+
+    // 0x400+i: Cycle count
+    memset(data, 0, 8);
+    data[0] = 0x02U;
+    put_u16le(&data[2], (uint16_t)(m->cycles > 0xFFFFU ? 0xFFFFU : m->cycles));
+    data[6] = 0x09U;
+    if (!send_can_std((uint32_t)(CAN_ID_DEYE_PACK_CYCLES_BASE + i), data, 8))
+      return;
+  }
+
+  if (online_count > 0 && (tx_cycle % 5U) == 1U) {
+    if (slow_cursor >= online_count)
+      slow_cursor = 0;
+    send_deye_pack_identity(online_indices[slow_cursor]);
+    slow_cursor = (uint8_t)((slow_cursor + 1U) % online_count);
+  }
+}
+#endif
+
 static void send_all_frames(void) {
   gpio_bit_set(LED_PCSCAN_PORT, LED_PCSCAN_PIN); // LED4: CAN activity
+  bool can_ok = true;
   uint8_t data[8] = {0};
   put_u16le(&data[0], charge_voltage_limit);
   put_u16le(&data[2], charge_current_limit);
   put_u16le(&data[4], discharge_current_limit);
   put_u16le(&data[6], DISCHARGE_VOLTAGE_LIMIT_X10);
-  send_can_std(CAN_ID_LIMITS, data, 8);
+  can_ok = send_can_std(CAN_ID_LIMITS, data, 8) && can_ok;
 
   memset(data, 0, 8);
   // Deye off-grid workaround (Battery-Emulator BYD-CAN.cpp): оф-грід Deye
@@ -1600,16 +1802,28 @@ static void send_all_frames(void) {
     can_soc = 100;
   put_u16le(&data[0], can_soc);
   put_u16le(&data[2], bms_soh);
-  send_can_std(CAN_ID_SOC, data, 4);
+  can_ok = send_can_std(CAN_ID_SOC, data, 4) && can_ok;
 
   memset(data, 0, 8);
   put_u16le(&data[0], (uint16_t)round_to_i16(bms_voltage * 100.0f));
   put_u16le(&data[2], (uint16_t)round_to_i16(bms_current * 10.0f));
   put_u16le(&data[4], (uint16_t)round_to_i16(bms_temp * 10.0f));
-  send_can_std(CAN_ID_STATUS, data, 6);
+  can_ok = send_can_std(CAN_ID_STATUS, data, CAN_PROTOCOL_DEYE_V33 ? 8 : 6) && can_ok;
 
-  // 0x359: Bytes 0..1 Protection, Bytes 2..3 Alarm, Byte 4 Module count, Bytes 5..6 'P' 'N', Byte 7 0
   memset(data, 0, 8);
+#if CAN_PROTOCOL_DEYE_V33
+  // 0x359 Deye PCS CAN V3.3: Bytes 0..3 Protection Tables 1-4, Bytes 4..5 Alarm Tables 5-6, Byte 6 Error Table 7
+  data[0] = can_dy_p0;
+  data[1] = can_dy_p1;
+  data[2] = can_dy_p2;
+  data[3] = can_dy_p3;
+  data[4] = can_dy_a4;
+  data[5] = can_dy_a5;
+  data[6] = can_dy_e6;
+  data[7] = 0;
+  can_ok = send_can_std(CAN_ID_PROTECT, data, 8) && can_ok;
+#else
+  // 0x359: Bytes 0..1 Protection, Bytes 2..3 Alarm, Byte 4 Module count, Bytes 5..6 'P' 'N', Byte 7 0
   data[0] = can_protect_b0;
   data[1] = can_protect_b1;
   data[2] = can_alarm_b2;
@@ -1618,7 +1832,8 @@ static void send_all_frames(void) {
   data[5] = 'P';
   data[6] = 'N';
   data[7] = 0;
-  send_can_std(CAN_ID_PROTECT, data, 8);
+  can_ok = send_can_std(CAN_ID_PROTECT, data, 8) && can_ok;
+#endif
 
   // 0x35C: Request / Enable flags
   // Bit 7 (0x80) = Charge enable: active only if data valid, not inhibited, CCL > 0
@@ -1632,10 +1847,54 @@ static void send_all_frames(void) {
       req_flags |= 0x40;
   }
   data[0] = req_flags;
-  send_can_std(CAN_ID_FLAGS, data, 2);
+  can_ok = send_can_std(CAN_ID_FLAGS, data, CAN_PROTOCOL_DEYE_V33 ? 8 : 2) && can_ok;
 
+#if CAN_PROTOCOL_DEYE_V33
+  memset(data, 0, 8);
+  data[0] = 'D';
+  data[1] = 'Y';
+  data[2] = '0';
+  data[3] = '0';
+  data[4] = '1';
+  data[5] = bms_pack_count;
+  uint32_t total_cap_01ah = (uint32_t)bms_pack_count * 1000U; // ESM-48100 = 100Ah (1000 * 0.1Ah)
+  if (total_cap_01ah > 0xFFFFU)
+    total_cap_01ah = 0xFFFFU;
+  put_u16le(&data[6], (uint16_t)total_cap_01ah);
+  can_ok = send_can_std(CAN_ID_BRAND, data, 8) && can_ok;
+
+  memset(data, 0, 8);
+  uint16_t cell_max = (bms_data_valid && agg_max_cell_mv != 0) ? agg_max_cell_mv : 0;
+  uint16_t cell_min = (bms_data_valid && agg_min_cell_mv != 0xFFFF) ? agg_min_cell_mv : 0;
+  put_u16le(&data[0], cell_max);
+  put_u16le(&data[2], cell_min);
+  put_u16le(&data[4], (uint16_t)round_to_i16(agg_temp_max * 10.0f));
+  put_u16le(&data[6], (uint16_t)round_to_i16(agg_temp_min * 10.0f));
+  can_ok = send_can_std(CAN_ID_CELL_EXTREMES, data, 8) && can_ok;
+
+  static const uint8_t deye_cfg[8] = {0x20, 0x08, 0x21, 0x02, 0x00, 0x00, 0x00, 0x00};
+  can_ok = send_can_std(CAN_ID_DEYE_CFG, deye_cfg, 8) && can_ok;
+
+  memset(data, 0, 8);
+  data[0] = bms_pack_count;
+  data[1] = (!charge_cell_ov_inhibit && !charge_temp_inhibit && charge_current_limit > 0) ? 0 : bms_pack_count;
+  data[2] = (!discharge_cell_uv_inhibit && !discharge_temp_inhibit && discharge_current_limit > 0) ? 0 : bms_pack_count;
+  data[3] = 0;
+  data[4] = bms_pack_count;
+  can_ok = send_can_std(CAN_ID_DEYE_PACK_COUNT, data, 8) && can_ok;
+
+  memset(data, 0, 8);
+  put_u16le(&data[0], charge_current_limit);
+  put_u16le(&data[2], discharge_current_limit);
+  can_ok = send_can_std(CAN_ID_GRID_LIMITS, data, 8) && can_ok;
+
+  if (bms_data_valid && can_ok) {
+    send_deye_per_pack_frames();
+  }
+#else
   static const uint8_t brand[8] = {'P', 'Y', 'L', 'O', 'N', 0, 0, 0};
   send_can_std(CAN_ID_BRAND, brand, 8);
+#endif
 
   can_led_off_ms = millis() + 100; // keep the LED on briefly after TX
 }
@@ -1728,6 +1987,7 @@ int main(void) {
   while (1) {
     watchdog_feed();
     uint32_t now = millis();
+    can_rx_service(now);
     pcs_poll_service(now); // mirror drain / bridge RX every pass
     if (now - last_dip_poll >= 250) {
       last_dip_poll = now;
@@ -1771,6 +2031,10 @@ int main(void) {
       sweep_protect_b1 = 0;
       sweep_alarm_b2 = 0;
       sweep_alarm_b3 = 0;
+      can_dy_p0 = can_dy_p1 = can_dy_p2 = can_dy_p3 = 0;
+      can_dy_a4 = can_dy_a5 = can_dy_e6 = 0;
+      sweep_dy_p0 = sweep_dy_p1 = sweep_dy_p2 = sweep_dy_p3 = 0;
+      sweep_dy_a4 = sweep_dy_a5 = sweep_dy_e6 = 0;
     }
 
     // Fallback keepalive: якщо зв'язок RS485 раптом замовк більше ніж на 2000 мс (обрив),
