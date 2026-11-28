@@ -57,12 +57,13 @@ enum HwQueryId : uint8_t {
   HW_Q_CELL_TEMP = HW_Q_FAST_COUNT, // 0x0012 ×15: температури 15 комірок
   HW_Q_SYS_INFO, // 0x0100 ×15: версії ПЗ/апаратури, кількість комірок
   HW_Q_MODEL,    // 0x0332 ×12: модель акумулятора (ESM-48100U2)
+  HW_Q_SERIAL,   // 0x0340 ×10: серійний номер (20 байтів ASCII)
   HW_Q_COUNT
 };
 
 static const HwQuery HW_QUERIES[HW_Q_COUNT] = {
     {0x0000, 7}, {0x0042, 9}, {0x0022, 15},
-    {0x0012, 15}, {0x0100, 15}, {0x0332, 12},
+    {0x0012, 15}, {0x0100, 15}, {0x0332, 12}, {0x0340, 10},
 };
 
 
@@ -1033,6 +1034,9 @@ static uint8_t hw_parse_response(uint8_t addr_idx, uint8_t q) {
     break;
 
   case HW_Q_MODEL: // 0x0332 ×12: модель (транслюється в PCS-485 дзеркало)
+    break;
+
+  case HW_Q_SERIAL: // 0x0340 ×10: серійний номер (транслюється в PCS-485 дзеркало)
     break;
 
   default:
