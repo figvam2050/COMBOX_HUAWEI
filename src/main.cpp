@@ -95,11 +95,11 @@ static uint16_t modbus_crc16(const uint8_t *data, uint16_t len) {
 #define CHARGE_CURRENT_LIMIT_DEFAULT 0
 #define DISCHARGE_CURRENT_LIMIT_DEFAULT 0
 
-#define CHARGE_VOLTAGE_LIMIT_STATIC 532 // 53.2 V (3.546 V/cell * 15): Victron/Pylontech 15S profile
+#define CHARGE_VOLTAGE_LIMIT_STATIC 535 // 53.5 V (3.567 V/cell * 15): Huawei ESM Equalized charge voltage
 #define CHARGE_VOLTAGE_LIMIT_DIP90 518
-// Per-pack charge current limit, selected by DIP5 (see DIP_CHARGE_CURRENT_50A):
-// OFF = 40 A (soft margin), ON = 50 A (battery manufacturer maximum).
-#define CHARGE_CURRENT_LIMIT_PER_PACK_DIP5_OFF_X10 400
+// Per-pack charge current limit, selected by DIP4 (see DIP_CHARGE_CURRENT_15A):
+// OFF = 50 A (battery manufacturer maximum), ON = 15 A (soft charge limit).
+#define CHARGE_CURRENT_LIMIT_PER_PACK_DIP4_ON_X10 150
 #define CHARGE_CURRENT_LIMIT_PER_PACK_X10 500
 #define DISCHARGE_CURRENT_LIMIT_PER_PACK_X10 1000
 #define DISCHARGE_VOLTAGE_LIMIT_X10 450
@@ -115,9 +115,12 @@ static uint16_t modbus_crc16(const uint8_t *data, uint16_t len) {
 // 90% profile = SW1 ON (weight 1 => code 0b00001), moved from SW4 on 17.10.2026
 // (convenient switch); stock SW1 protocol meaning (PYLON) is not used by us.
 #define DIP_PROFILE_CODE_90 1
-// DIP5 (SW5, weight 16, PC6) selects the per-pack charge current limit:
-// OFF = 40 A, ON = 50 A. Orthogonal to the SW1 voltage profile.
-#define DIP_CHARGE_CURRENT_50A 0x10
+// DIP4 (SW4, weight 8, PB15) selects the per-pack charge current limit:
+// OFF = 50 A, ON = 15 A. Orthogonal to the SW1 voltage profile.
+// DIP5 (SW5, weight 16, PC6) selects 54.0 V equalization/balancing mode (priority over DIP1).
+#define DIP_BALANCE_54V 0x10
+#define CHARGE_VOLTAGE_LIMIT_54V 540
+#define DIP_CHARGE_CURRENT_15A 0x08
 
 // Physical cell over-voltage threshold for BMS hardware protection confirmation (Q17).
 // Independent of DIP90 taper target so that software 90% profile never generates false alarms:
@@ -1924,12 +1927,17 @@ static void watchdog_feed(void) { FWDGT_CTL = FWDGT_KEY_RELOAD; }
 
 static uint8_t dip_read_code(void) {
   uint8_t code = (uint8_t)((~GPIO_ISTAT(DIP_GPIO_PORT) >> 12) & 0x0FU);
-  if (!(GPIO_ISTAT(DIP5_GPIO_PORT) & DIP5_GPIO_PIN)) code |= DIP_CHARGE_CURRENT_50A;
+  if (!(GPIO_ISTAT(DIP5_GPIO_PORT) & DIP5_GPIO_PIN)) code |= 0x10;
   return code;
 }
 
 static void dip_charge_profile_apply(uint8_t code) {
-  if (code & DIP_PROFILE_CODE_90) {
+  if (code & DIP_BALANCE_54V) {
+    profile_charge_voltage_limit = CHARGE_VOLTAGE_LIMIT_54V;
+    profile_taper_start_mv = CELL_TAPER_START_MV;
+    profile_charge_stop_mv = 3600;
+    profile_charge_reenable_mv = CELL_CHARGE_REENABLE_MV;
+  } else if (code & DIP_PROFILE_CODE_90) {
     profile_charge_voltage_limit = CHARGE_VOLTAGE_LIMIT_DIP90;
     profile_taper_start_mv = CELL_TAPER_START_MV_DIP90;
     profile_charge_stop_mv = CELL_CHARGE_STOP_MV_DIP90;
@@ -1941,8 +1949,8 @@ static void dip_charge_profile_apply(uint8_t code) {
     profile_charge_reenable_mv = CELL_CHARGE_REENABLE_MV;
   }
   profile_charge_current_per_pack_x10 =
-      (code & DIP_CHARGE_CURRENT_50A) ? CHARGE_CURRENT_LIMIT_PER_PACK_X10
-                                      : CHARGE_CURRENT_LIMIT_PER_PACK_DIP5_OFF_X10;
+      (code & DIP_CHARGE_CURRENT_15A) ? CHARGE_CURRENT_LIMIT_PER_PACK_DIP4_ON_X10
+                                      : CHARGE_CURRENT_LIMIT_PER_PACK_X10;
   charge_voltage_limit = profile_charge_voltage_limit;
   dip_applied_code = code;
   pcs_mode_apply(code); // DIP2: mirror (OFF) vs inverter bridge (ON)
