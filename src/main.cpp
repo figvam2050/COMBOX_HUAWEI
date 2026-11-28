@@ -106,11 +106,11 @@ static uint16_t modbus_crc16(const uint8_t *data, uint16_t len) {
 // Max-cell charge taper: 50 A/pack to 0 A between 3.450 V and 3.600 V.
 // Re-enabling below 3.550 V prevents charge-limit oscillation at the cutoff.
 #define CELL_TAPER_START_MV 3450
-#define CELL_CHARGE_STOP_MV 3600
-#define CELL_CHARGE_REENABLE_MV 3550
+#define CELL_CHARGE_STOP_MV 3560
+#define CELL_CHARGE_REENABLE_MV 3380
 #define CELL_TAPER_START_MV_DIP90 3400
 #define CELL_CHARGE_STOP_MV_DIP90 3455
-#define CELL_CHARGE_REENABLE_MV_DIP90 3405
+#define CELL_CHARGE_REENABLE_MV_DIP90 3350
 // 90% profile = SW1 ON (weight 1 => code 0b00001), moved from SW4 on 17.10.2026
 // (convenient switch); stock SW1 protocol meaning (PYLON) is not used by us.
 #define DIP_PROFILE_CODE_90 1
