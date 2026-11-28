@@ -145,13 +145,9 @@ static uint16_t modbus_crc16(const uint8_t *data, uint16_t len) {
 #define TEMP_DISCHARGE_MAX_REENABLE_C 58.0f
 
 // ===== Balance session engine =====
-// DIP5 ON: forced 54.0 V equalization (overrides DIP1 and auto sessions).
-// DIP1 OFF (standard): CVL 53.5 V; auto balance windows (BAL_AUTO_ENABLED)
-// open at 54.0 V on cell-spread analysis: full thresholds + 2 A per pack cap.
-// DIP1 ON (51.8 V option): auto logic disabled, profile holds 51.8 V with
-// the same 2 A trickle from 3400 mV (~90%) so passive balancing has gentle
-// CV time.
-#define BAL_AUTO_ENABLED 1
+// Автобалансування повністю вимкнено у всіх режимах (BAL_AUTO_ENABLED = 0):
+// напруга заряду та пороги визначаються виключно перемикачами DIP1 та DIP5.
+#define BAL_AUTO_ENABLED 0
 #define BAL_SPREAD_HIGH_MV 100     // anomaly bucket (>= 100 mV): retry in 24 h
 #define BAL_SPREAD_MED_MV 30       // regular spread bucket (30..100 mV): retry in 72 h
 #define BAL_SPREAD_EXIT_MV 25      // session success target (spread <= 25 mV)
@@ -1076,14 +1072,10 @@ static uint16_t calculate_discharge_limit(uint8_t pack_count) {
 }
 
 // ===== Balance session engine =====
-// DIP5 ON: forced 54.0 V equalization (overrides DIP1 and auto sessions).
-// DIP1 OFF (standard): CVL 53.5 V + auto sessions (BAL_AUTO_ENABLED) at 54.0 V,
-// driven by cell-spread analysis. DIP1 ON: 90% conservative mode (51.8 V), no auto sessions.
-// Both modes cap the current at 2 A per pack once min cell >= 3400 mV (~90%),
-// giving passive balancing hours of gentle CV time. Sessions exit on spread
-// convergence (<= 25 mV), BMS loss, sustained discharge (grid outage), no progress
-// or an 8 h timeout.
+// Автобалансування вимкнено (BAL_AUTO_ENABLED = 0): напруга та пороги
+// визначаються суворо за DIP1 / DIP5 без автоматичних вікон 54 В та 2 А trickle.
 
+#if BAL_AUTO_ENABLED
 static void balance_session_end(bool success, uint32_t cooldown_until) {
   bal_session_active = false;
   bal_trickle = false;
@@ -1119,8 +1111,23 @@ static bool balance_trend_high(void) {
   return ((int32_t)bal_hist_mv[bal_hist_n - 1] -
           (int32_t)bal_hist_mv[bal_hist_n - 12]) > BAL_TREND_DELTA_MV_12H;
 }
+#else
+static void balance_on_bms_lost(void) {
+  bal_session_active = false;
+  bal_trickle = false;
+}
+#endif
 
 static void balance_update(uint8_t packs) {
+#if !BAL_AUTO_ENABLED
+  (void)packs;
+  bal_session_active = false;
+  bal_trickle = false;
+  calc_taper_start_mv = profile_taper_start_mv;
+  calc_charge_stop_mv = profile_charge_stop_mv;
+  calc_charge_reenable_mv = profile_charge_reenable_mv;
+  return;
+#else
   bool force_54v = (dip_applied_code & DIP_BALANCE_54V) != 0;
   if (force_54v) {
     bal_session_active = false;
@@ -1264,11 +1271,11 @@ static void balance_update(uint8_t packs) {
   calc_taper_start_mv = CELL_TAPER_START_MV;
   calc_charge_stop_mv = 3600;
   calc_charge_reenable_mv = CELL_CHARGE_REENABLE_MV;
+#endif
 }
 
 // LED1 (PC13): fast blink (200 ms) = DIP5 54.0 V forced balance,
-// solid = 51.8 V option (DIP1 ON), slow blink (500 ms) = auto session,
-// off = standard 53.5 V without session. Called from the main loop.
+// solid = 51.8 V option (DIP1 ON), off = standard 53.5 V. Called from the main loop.
 static void balance_led_tick(uint32_t now) {
   static bool on = false;
   static uint32_t last_toggle = 0;
@@ -1470,8 +1477,7 @@ static void bms_aggregate_data(void) {
   bms_pack_count = effective_packs;
 
   balance_update(effective_packs);
-  charge_voltage_limit = bal_session_active ? CHARGE_VOLTAGE_LIMIT_54V
-                                            : profile_charge_voltage_limit;
+  charge_voltage_limit = profile_charge_voltage_limit;
   charge_current_limit = calculate_charge_limit(effective_packs);
   discharge_current_limit = calculate_discharge_limit(effective_packs);
 
@@ -1839,11 +1845,9 @@ static void dip_charge_profile_apply(uint8_t code) {
       (code & DIP_CHARGE_CURRENT_15A) ? CHARGE_CURRENT_LIMIT_PER_PACK_DIP4_ON_X10
                                       : CHARGE_CURRENT_LIMIT_PER_PACK_X10;
   charge_voltage_limit = profile_charge_voltage_limit;
-  if (!bal_session_active || (code & DIP_BALANCE_54V)) {
-    calc_taper_start_mv = profile_taper_start_mv;
-    calc_charge_stop_mv = profile_charge_stop_mv;
-    calc_charge_reenable_mv = profile_charge_reenable_mv;
-  }
+  calc_taper_start_mv = profile_taper_start_mv;
+  calc_charge_stop_mv = profile_charge_stop_mv;
+  calc_charge_reenable_mv = profile_charge_reenable_mv;
   dip_applied_code = code;
   pcs_mode_apply(code); // DIP2: mirror (OFF) vs inverter bridge (ON)
 }
