@@ -9,13 +9,13 @@
  * Hardware disclaimer: Third-party commercial PCB/hardware (Felicity Solar / OEM).
  * The author is not affiliated with the hardware manufacturer. Aftermarket firmware.
  *
- * BMS 485 to CAN Converter for Deye Inverter (Lithium Mode 00 - Deye generic
- * CAN / Pylontech). Hardware: GD32F305 + ISO1050 (CAN) + CA-IS3080WX (RS485)
+ * BMS 485 to CAN Converter for Deye Inverter (Deye PCS CAN V3.3 / DY001,
+ * Lithium Mode 00). Hardware: GD32F305 + ISO1050 (CAN) + CA-IS3080WX (RS485)
  *
  * COMBOX_HUAWEI: адаптація для промислових батарей Huawei ESM
- * (ESM-48100 / ESM-48150, Modbus RTU RS485: адреси 0xD6–0xDD / 0xE0–0xE7).
+ * (ESM-48100 / ESM-48150, Modbus RTU RS485: адреси 0xD6–0xD7).
  * База знань та реєстри — HUAWEI_REFERENCE.md (§5, §6, §7).
- * Вихідний CAN-бік (Pylontech для Deye), fail-closed, балансування,
+ * Вихідний CAN-бік (Deye PCS CAN V3.3 / DY001), fail-closed, балансування,
  * профілі DIP та PCS-485 (діагностичне дзеркало) активні.
  *
  * Frame set and layout follow "PCS CAN-Bus-protocol-DY-low-voltage V3.3" and
@@ -55,7 +55,7 @@ enum HwQueryId : uint8_t {
   HW_Q_CELL,     // 0x0022 ×15: напруги 15 комірок, U16 мВ BE
   HW_Q_FAST_COUNT,
   HW_Q_CELL_TEMP = HW_Q_FAST_COUNT, // 0x0012 ×15: температури 15 комірок
-  HW_Q_SYS_INFO, // 0x0100 ×15: версії ПЗ/апаратури, кількість комірок
+  HW_Q_SYS_INFO, // 0x0101 ×15: версії ПЗ/апаратури, кількість комірок (0x010F)
   HW_Q_MODEL,    // 0x0332 ×12: модель акумулятора (ESM-48100U2)
   HW_Q_SERIAL,   // 0x0340 ×10: серійний номер (20 байтів ASCII)
   HW_Q_COUNT
@@ -63,7 +63,7 @@ enum HwQueryId : uint8_t {
 
 static const HwQuery HW_QUERIES[HW_Q_COUNT] = {
     {0x0000, 7}, {0x0042, 9}, {0x0022, 15},
-    {0x0012, 15}, {0x0100, 15}, {0x0332, 12}, {0x0340, 10},
+    {0x0012, 15}, {0x0101, 15}, {0x0332, 12}, {0x0340, 10},
 };
 
 
@@ -104,8 +104,8 @@ static uint16_t modbus_crc16(const uint8_t *data, uint16_t len) {
 #define DISCHARGE_CURRENT_LIMIT_PER_PACK_X10 1000
 #define DISCHARGE_VOLTAGE_LIMIT_X10 450
 
-// Max-cell charge taper: 50 A/pack to 0 A between 3.450 V and 3.600 V.
-// Re-enabling below 3.550 V prevents charge-limit oscillation at the cutoff.
+// Max-cell charge taper: 50 A/pack to 0 A between 3.450 V and active stop threshold.
+// Re-enabling below 3.380 V (Standard) prevents charge-limit oscillation at the cutoff.
 #define CELL_TAPER_START_MV 3450
 #define CELL_CHARGE_STOP_MV 3560
 #define CELL_CHARGE_REENABLE_MV 3380
@@ -144,13 +144,14 @@ static uint16_t modbus_crc16(const uint8_t *data, uint16_t len) {
 #define TEMP_DISCHARGE_MAX_C 60.0f
 #define TEMP_DISCHARGE_MAX_REENABLE_C 58.0f
 
-// ===== Balance session engine (17.10.2026) =====
-// DIP1 OFF (standard): CVL 54.0 V; auto balance windows (BAL_AUTO_ENABLED)
-// open on cell-spread analysis: full thresholds + 2 A per pack cap.
+// ===== Balance session engine =====
+// DIP5 ON: forced 54.0 V equalization (overrides DIP1 and auto sessions).
+// DIP1 OFF (standard): CVL 53.5 V; auto balance windows (BAL_AUTO_ENABLED)
+// open at 54.0 V on cell-spread analysis: full thresholds + 2 A per pack cap.
 // DIP1 ON (51.8 V option): auto logic disabled, profile holds 51.8 V with
 // the same 2 A trickle from 3400 mV (~90%) so passive balancing has gentle
 // CV time.
-#define BAL_AUTO_ENABLED 1 // verdict (A) 18.10.2026: weak cell #7 confirmed
+#define BAL_AUTO_ENABLED 1
 #define BAL_SPREAD_HIGH_MV 100     // anomaly bucket (>= 100 mV): retry in 24 h
 #define BAL_SPREAD_MED_MV 30       // regular spread bucket (30..100 mV): retry in 72 h
 #define BAL_SPREAD_EXIT_MV 25      // session success target (spread <= 25 mV)
@@ -184,11 +185,11 @@ static uint16_t modbus_crc16(const uint8_t *data, uint16_t len) {
 #define CAN_PROT_CHARGE_OC     0x01
 #define CAN_PROT_SYSTEM_ERROR  0x08
 
-// RS485 register units -> physical units. Confirm against the battery model.
-// reg1 current: 1 = BMS reports charge as positive (negated for Deye CAN),
-//               0 = BMS reports discharge as positive (passed through).
+// Huawei ESM register units -> physical units.
+// 0x0002 current: 1 = BMS reports charge as positive (negated for Deye CAN),
+//                 0 = BMS reports discharge as positive (passed through).
 #define BMS_CURRENT_CHARGE_IS_POSITIVE 1
-// reg19 temperature raw divisor: 1 = reg 0x13 holds whole C (dump 08.10.2026).
+// 0x0005/0x0006 temperature raw divisor: 1 = whole °C.
 #define BMS_TEMP_RAW_DIV 1.0f
 
 #define CAN_PROTOCOL_DEYE_V33 1
@@ -243,7 +244,7 @@ static uint16_t modbus_crc16(const uint8_t *data, uint16_t len) {
 //   LED4 (PC5)  = CAN to inverter — blinks on TX bursts;
 //   LED3 (PC4)  = PCS-485 port (UART4, Q23): blinks on TX/RX — mirror mode
 //                 (DIP2 OFF) or inverter bridge traffic (DIP2 ON);
-//   LED1 (PC13) = free/debug — dark;
+//   LED1 (PC13) = balance/profile status (see balance_led_tick()).
 //   LED2 (VDDA) = power — wired to rail, not MCU-controlled.
 // PC5 is NOT an RS485 direction pin (PC5=DE disproven, RS485 has
 // auto-direction transceivers — ORIGINAL_FIRMWARE.md §14.3).
@@ -284,11 +285,14 @@ static uint8_t bms_soh = BATTERY_SOH_DEFAULT;
 // Packs seen in the last full cycle; kept (not cleared) on comm loss so
 // 0x359 byte 4 stays the fixed system size the inverter expects.
 static uint8_t bms_pack_count = 0;
+static uint16_t bank_max_cell_mv = 0;
+static uint16_t bank_min_cell_mv = 0;
+static float bank_temp_max = BATTERY_TEMP_DEFAULT;
+static float bank_temp_min = BATTERY_TEMP_DEFAULT;
 
 static float agg_voltage_sum = 0.0f;
 static float agg_current_sum = 0.0f;
 static uint32_t agg_soc_sum = 0;
-static uint32_t agg_soh_sum = 0;
 static float agg_temp_max = -1000.0f;
 static float agg_temp_min = 1000.0f;
 static uint8_t agg_count = 0;
@@ -334,7 +338,6 @@ typedef struct {
   uint8_t soh;           // 0x0004 %
   int16_t t_max;         // 0x0005 °C
   int16_t t_min;         // 0x0006 °C
-  uint8_t state;         // 0x000A: 0 Charge, 1 Discharge, 2 Full, 3 Free
   uint32_t cycles;       // 0x0042–0x0043 U32 BE
   uint32_t ah;           // 0x0044–0x0045 U32 BE
   uint16_t alarm[5];     // 0x0046..0x004A (бітові мапи — §5.4)
@@ -500,7 +503,6 @@ static void rs485_flush_rx(void) {
 static void watchdog_feed(void);
 static void send_all_frames(void);
 static uint32_t last_can = 0;
-static bool bms_parse_response(uint8_t expected_addr); // Legacy 83-byte frame (DIP2 bridge test path)
 static void bms_aggregate_data(void);
 static void agg_reset(void);
 static void hw_send_query(uint8_t addr_idx, uint8_t q);
@@ -680,12 +682,8 @@ static bool pcs_bridge_step(uint32_t now) {
     }
     if (br_got && uart_rx_index >= PCS_NOISE_MIN_LEN &&
         (now - br_last_ms) >= PCS_GAP_MS) {
-      // Feed CAN/balance from the bridged exchange: in bridge mode the box
-      // sends no own polls, so this is the ONLY data source. Keeps
-      // last_bms_response_ms fresh -> fail-closed still trips when the
-      // inverter stops polling.
-      if (bms_parse_response(uart_rx_buffer[0]))
-        last_bms_response_ms = millis();
+      // Pure transparent bridge: relay BMS answer back to the master.
+      last_bms_response_ms = millis();
       br_state = BR_FWD_RESP; // complete answer — relay it as-is
       return false;
     }
@@ -793,145 +791,6 @@ static uint16_t bms_receive_response(uint16_t expected_len) {
   return uart_rx_index;
 }
 
-static bool bms_parse_response(uint8_t expected_addr) {
-  if (expected_addr < 1 || expected_addr > 16)
-    return false; // not one of our pack addresses (bridge forwards anything)
-  if (uart_rx_index < 5)
-    return false;
-  if (uart_rx_buffer[0] != expected_addr || uart_rx_buffer[1] != 0x03)
-    return false;
-  // Byte count: our own window is 0x4E (39 regs, 83 B); a bridged inverter
-  // frame (Deye) asks 0x38 (28 regs, 61 B). Other windows (e.g. reg 0x50)
-  // are not ours — they stay transparent and are never aggregated.
-  uint16_t data_bytes = uart_rx_buffer[2];
-  if (data_bytes != 0x4E && data_bytes != 0x38)
-    return false;
-  uint16_t frame_len = (uint16_t)(5 + data_bytes);
-  if (uart_rx_index < frame_len)
-    return false;
-
-  uint16_t received_crc = (uart_rx_buffer[frame_len - 1] << 8) |
-                          uart_rx_buffer[frame_len - 2];
-  uint16_t calculated_crc =
-      modbus_crc16((uint8_t *)uart_rx_buffer, frame_len - 2);
-  if (received_crc != calculated_crc)
-    return false;
-
-  uint16_t raw_voltage = (uart_rx_buffer[3] << 8) | uart_rx_buffer[4];
-  int16_t raw_current = (int16_t)((uart_rx_buffer[5] << 8) | uart_rx_buffer[6]);
-  uint16_t raw_soc = (uart_rx_buffer[45] << 8) | uart_rx_buffer[46];
-  uint16_t raw_soh = (uart_rx_buffer[47] << 8) | uart_rx_buffer[48];
-
-  for (uint8_t cell = 0; cell < 15; cell++) {
-    uint16_t cell_mv = ((uint16_t)uart_rx_buffer[7 + cell * 2] << 8) |
-                       uart_rx_buffer[8 + cell * 2];
-    if (cell_mv > agg_max_cell_mv)
-      agg_max_cell_mv = cell_mv;
-    if (cell_mv > 0 && cell_mv < agg_min_cell_mv)
-      agg_min_cell_mv = cell_mv;
-  }
-
-  // Multi-sensor temperature tracking: regs 18, 19, 20 (bytes 39..44)
-  // Sanity check all sensor channels (-40..120 °C) to reject disconnected (0x7FFF) or corrupted probes:
-  int16_t t_a = (int16_t)((uart_rx_buffer[39] << 8) | uart_rx_buffer[40]);
-  int16_t t_main = (int16_t)((uart_rx_buffer[41] << 8) | uart_rx_buffer[42]);
-  int16_t t_b = (int16_t)((uart_rx_buffer[43] << 8) | uart_rx_buffer[44]);
-
-  float pack_t_max = -1000.0f;
-  float pack_t_min = 1000.0f;
-  if (t_main >= -40 && t_main <= 120) {
-    pack_t_max = (float)t_main;
-    pack_t_min = (float)t_main;
-  }
-  if (t_a >= -40 && t_a <= 120) {
-    if (pack_t_max < -500.0f || (float)t_a > pack_t_max) pack_t_max = (float)t_a;
-    if (pack_t_min > 500.0f || (float)t_a < pack_t_min) pack_t_min = (float)t_a;
-  }
-  if (t_b >= -40 && t_b <= 120) {
-    if (pack_t_max < -500.0f || (float)t_b > pack_t_max) pack_t_max = (float)t_b;
-    if (pack_t_min > 500.0f || (float)t_b < pack_t_min) pack_t_min = (float)t_b;
-  }
-  if (pack_t_max < -500.0f) {
-    pack_t_max = BATTERY_TEMP_DEFAULT;
-    pack_t_min = BATTERY_TEMP_DEFAULT;
-  }
-  if (pack_t_max > agg_temp_max)
-    agg_temp_max = pack_t_max;
-  if (pack_t_min < agg_temp_min)
-    agg_temp_min = pack_t_min;
-
-  // Status, Warning, Protection (regs 25..27, bytes 53..58): present in both
-  // accepted windows (data_bytes >= 56). Error (reg 28, bytes 59..60) exists
-  // only in the full 39-reg window — the 28-reg inverter window ends at reg 27.
-  uint16_t reg_status  = ((uint16_t)uart_rx_buffer[53] << 8) | uart_rx_buffer[54];
-  uint16_t reg_warning = ((uint16_t)uart_rx_buffer[55] << 8) | uart_rx_buffer[56];
-  uint16_t reg_protect = ((uint16_t)uart_rx_buffer[57] << 8) | uart_rx_buffer[58];
-  uint16_t reg_error   = 0;
-  if (data_bytes >= 58)
-    reg_error = ((uint16_t)uart_rx_buffer[59] << 8) | uart_rx_buffer[60];
-
-  // Cross-validate with physical measurements to reject transient Boot Latch flags (Q17):
-  // Confirmation uses physical threshold CELL_PHYSICAL_OV_CONFIRM_MV (3600 mV), NOT calc_charge_stop_mv,
-  // so that activating the 90% software taper profile never generates false emergency cell OV alarms:
-  if ((reg_protect & 0x0002) && agg_max_cell_mv >= CELL_PHYSICAL_OV_CONFIRM_MV)
-    sweep_protect_b0 |= (CAN_PROT_CELL_OV | CAN_PROT_PACK_OV);
-  if ((reg_protect & 0x0008) && (agg_min_cell_mv <= CELL_UV_WARN_MV || (raw_soc & 0xFF) <= 5))
-    sweep_protect_b0 |= CAN_PROT_CELL_UV;
-  if ((reg_protect & 0x0001) && raw_voltage >= 5450)
-    sweep_protect_b0 |= CAN_PROT_PACK_OV;
-  if ((reg_protect & 0x0004) && raw_voltage <= 4320)
-    sweep_protect_b0 |= CAN_PROT_CELL_UV;
-  if ((reg_protect & 0x0300) || pack_t_max >= TEMP_DISCHARGE_MAX_C)
-    sweep_protect_b0 |= CAN_PROT_OT;
-  // System-level UT protection stops both charge and discharge in Deye; trigger only if battery
-  // is under the physical discharge limit (-20°C) or BMS asserts protection (charge limit handled via CCL=0):
-  if ((reg_protect & 0x0C00) || pack_t_min <= TEMP_DISCHARGE_MIN_C)
-    sweep_protect_b0 |= CAN_PROT_UT;
-  if (reg_protect & 0x0020)
-    sweep_protect_b0 |= CAN_PROT_DISCHARGE_OC;
-
-  if (reg_protect & 0x0010)
-    sweep_protect_b1 |= CAN_PROT_CHARGE_OC;
-  if ((reg_protect & 0x2000) || (reg_status & 0x0004) || reg_error != 0)
-    sweep_protect_b1 |= CAN_PROT_SYSTEM_ERROR;
-
-  // Mirror confirmed warnings into CAN alarm bytes 2 and 3:
-  if ((reg_warning & 0x0002) && agg_max_cell_mv >= CELL_PHYSICAL_OV_WARN_CONFIRM_MV)
-    sweep_alarm_b2 |= (CAN_PROT_CELL_OV | CAN_PROT_PACK_OV);
-  if ((reg_warning & 0x0008) && (agg_min_cell_mv <= CELL_UV_WARN_MV || (raw_soc & 0xFF) <= 10))
-    sweep_alarm_b2 |= CAN_PROT_CELL_UV;
-  if ((reg_warning & 0x0001) && raw_voltage >= 5400)
-    sweep_alarm_b2 |= CAN_PROT_PACK_OV;
-  if ((reg_warning & 0x0004) && raw_voltage <= 4400)
-    sweep_alarm_b2 |= CAN_PROT_CELL_UV;
-  if ((reg_warning & 0x0300) || pack_t_max >= 50.0f)
-    sweep_alarm_b2 |= CAN_PROT_OT;
-  if ((reg_warning & 0x0C00) || pack_t_min <= (TEMP_DISCHARGE_MIN_C + 5.0f))
-    sweep_alarm_b2 |= CAN_PROT_UT;
-  if (reg_warning & 0x0020)
-    sweep_alarm_b2 |= CAN_PROT_DISCHARGE_OC;
-  if (reg_warning & 0x0010)
-    sweep_alarm_b3 |= CAN_PROT_CHARGE_OC;
-
-  bool dup = (sweep_seen_mask & (1 << (expected_addr - 1))) != 0;
-  sweep_seen_mask |= (1 << (expected_addr - 1));
-
-  // Feed the sums once per address per sweep: in bridge mode the inverter may
-  // repeat an address and would bias the averages toward it. Cells/temps and
-  // the |= latches above stay idempotent, so only the sums are gated.
-  if (!dup) {
-    agg_voltage_sum += raw_voltage / 100.0f;
-    agg_current_sum += raw_current / 100.0f;
-    agg_soc_sum += (uint8_t)(raw_soc & 0xFF);
-    agg_soh_sum += (uint8_t)(raw_soh & 0xFF);
-    if ((uint8_t)(raw_soh & 0xFF) < agg_soh_min)
-      agg_soh_min = (uint8_t)(raw_soh & 0xFF); // єдине правило §6 для обох шляхів
-    agg_count++;
-  }
-
-  return true;
-}
-
 // --- Huawei ESM: декод відповіді у hw_mod + живлення агрегат-сум (§5, §6) --
 // Повертає: 0 — не наш або битий кадр; 1 — дані FC03; 2 — виняток Modbus
 // (модуль на шині, але відмовився від реєстра — присутність враховується).
@@ -985,7 +844,6 @@ static uint8_t hw_parse_response(uint8_t addr_idx, uint8_t q) {
       agg_voltage_sum += m->pack_v; // §6: середнє по модулях
       agg_current_sum += m->current; // §6: сума; +заряд — CAN інвертує знак
       agg_soc_sum += soc;           // §6: середнє (однакова ємність)
-      agg_soh_sum += soh;
       if (soh < agg_soh_min)
         agg_soh_min = soh; // §6: SOH агрегату = мінімум по модулях
       agg_count++;
@@ -1032,7 +890,7 @@ static uint8_t hw_parse_response(uint8_t addr_idx, uint8_t q) {
       m->cell_temp[i] = (int16_t)((uint16_t)(d[i * 2] << 8) | d[i * 2 + 1]);
     break;
 
-  case HW_Q_SYS_INFO: // 0x0100 ×15: версії та кількість комірок (0x010F)
+  case HW_Q_SYS_INFO: // 0x0101 ×15: версії та кількість комірок (0x010F)
     m->ncell = (uint8_t)(((uint16_t)(d[14 * 2] << 8) | d[14 * 2 + 1]) & 0xFFU);
     break;
 
@@ -1094,14 +952,14 @@ static void hw_poll_service(uint32_t now) {
     hw_advance_addr();
     hw_next_slot_ms = now + HW_INTER_MODULE_MS;
   } else if (++hw_q_idx >= HW_Q_FAST_COUNT) {
-    // Раз на ~10 циклів додаємо один повільний запит для повного моніторингу на PCS-485
-    static uint8_t slow_tick = 0;
-    static uint8_t slow_q = HW_Q_CELL_TEMP;
-    if (++slow_tick >= 10) {
-      slow_tick = 0;
-      hw_q_idx = slow_q;
-      if (++slow_q >= HW_Q_COUNT)
-        slow_q = HW_Q_CELL_TEMP;
+    // Раз на ~5 циклів кожного модуля додаємо один повільний запит для повного моніторингу на PCS-485
+    static uint8_t slow_tick[HW_MODULE_COUNT] = {0};
+    static uint8_t slow_q[HW_MODULE_COUNT] = {HW_Q_CELL_TEMP, HW_Q_CELL_TEMP};
+    if (++slow_tick[idx] >= 5) {
+      slow_tick[idx] = 0;
+      hw_q_idx = slow_q[idx];
+      if (++slow_q[idx] >= HW_Q_COUNT)
+        slow_q[idx] = HW_Q_CELL_TEMP;
       hw_next_slot_ms = now + HW_INTER_QUERY_MS;
     } else {
       hw_advance_addr(); // всі швидкі регістри модуля прочитано
@@ -1217,9 +1075,10 @@ static uint16_t calculate_discharge_limit(uint8_t pack_count) {
   return (uint16_t)max_current_x10;
 }
 
-// ===== Balance session engine (17.10.2026) =====
-// DIP1 OFF (standard): CVL 54.0 V + auto sessions (BAL_AUTO_ENABLED), driven by
-// cell-spread analysis. DIP1 ON: 90% conservative mode (51.8 V), no auto sessions.
+// ===== Balance session engine =====
+// DIP5 ON: forced 54.0 V equalization (overrides DIP1 and auto sessions).
+// DIP1 OFF (standard): CVL 53.5 V + auto sessions (BAL_AUTO_ENABLED) at 54.0 V,
+// driven by cell-spread analysis. DIP1 ON: 90% conservative mode (51.8 V), no auto sessions.
 // Both modes cap the current at 2 A per pack once min cell >= 3400 mV (~90%),
 // giving passive balancing hours of gentle CV time. Sessions exit on spread
 // convergence (<= 25 mV), BMS loss, sustained discharge (grid outage), no progress
@@ -1262,6 +1121,15 @@ static bool balance_trend_high(void) {
 }
 
 static void balance_update(uint8_t packs) {
+  bool force_54v = (dip_applied_code & DIP_BALANCE_54V) != 0;
+  if (force_54v) {
+    bal_session_active = false;
+    bal_trickle = false;
+    calc_taper_start_mv = profile_taper_start_mv;
+    calc_charge_stop_mv = profile_charge_stop_mv;
+    calc_charge_reenable_mv = profile_charge_reenable_mv;
+    return;
+  }
   bool manual = (dip_applied_code & DIP_PROFILE_CODE_90) != 0;
   uint32_t now = millis();
   bool have_cells = (agg_max_cell_mv != 0) && (agg_min_cell_mv != 0xFFFF) &&
@@ -1331,10 +1199,9 @@ static void balance_update(uint8_t packs) {
     }
 
     // In-session thresholds: full-charge triple so the 54 V session is not
-    // cut by the 90% profile stop; the existing 3600 mV OV inhibit stays
-    // as the hard guard.
+    // cut by the 90% profile stop; 3600 mV OV inhibit stays as hard guard.
     calc_taper_start_mv = CELL_TAPER_START_MV;
-    calc_charge_stop_mv = CELL_CHARGE_STOP_MV;
+    calc_charge_stop_mv = 3600;
     calc_charge_reenable_mv = CELL_CHARGE_REENABLE_MV;
     return;
   }
@@ -1395,15 +1262,27 @@ static void balance_update(uint8_t packs) {
   bal_last_improve_ms = now;
   bal_trickle = false;
   calc_taper_start_mv = CELL_TAPER_START_MV;
-  calc_charge_stop_mv = CELL_CHARGE_STOP_MV;
+  calc_charge_stop_mv = 3600;
   calc_charge_reenable_mv = CELL_CHARGE_REENABLE_MV;
 }
 
-// LED1 (PC13): solid = 51.8 V option (DIP1 ON), slow blink = auto session,
-// off = standard 54 V without session. Called from the main loop.
+// LED1 (PC13): fast blink (200 ms) = DIP5 54.0 V forced balance,
+// solid = 51.8 V option (DIP1 ON), slow blink (500 ms) = auto session,
+// off = standard 53.5 V without session. Called from the main loop.
 static void balance_led_tick(uint32_t now) {
   static bool on = false;
   static uint32_t last_toggle = 0;
+  if (dip_applied_code & DIP_BALANCE_54V) {
+    if ((now - last_toggle) >= 200) {
+      last_toggle = now;
+      on = !on;
+      if (on)
+        gpio_bit_set(LED1_DEBUG_PORT, LED1_DEBUG_PIN);
+      else
+        gpio_bit_reset(LED1_DEBUG_PORT, LED1_DEBUG_PIN);
+    }
+    return;
+  }
   if (dip_applied_code & DIP_PROFILE_CODE_90) {
     gpio_bit_set(LED1_DEBUG_PORT, LED1_DEBUG_PIN);
     on = true;
@@ -1428,7 +1307,6 @@ static void agg_reset(void) {
   agg_voltage_sum = 0.0f;
   agg_current_sum = 0.0f;
   agg_soc_sum = 0;
-  agg_soh_sum = 0;
   agg_soh_min = 100; // §6: SOH агрегату = мінімум по модулях
   agg_temp_max = -1000.0f;
   agg_temp_min = 1000.0f;
@@ -1547,7 +1425,6 @@ static void bms_aggregate_data(void) {
       agg_voltage_sum += hw_mod[i].pack_v;
       agg_current_sum += hw_mod[i].current;
       agg_soc_sum += hw_mod[i].soc;
-      agg_soh_sum += hw_mod[i].soh;
       if (hw_mod[i].soh < agg_soh_min)
         agg_soh_min = hw_mod[i].soh;
       agg_count++;
@@ -1593,10 +1470,16 @@ static void bms_aggregate_data(void) {
   bms_pack_count = effective_packs;
 
   balance_update(effective_packs);
-  charge_voltage_limit = bal_session_active ? CHARGE_VOLTAGE_LIMIT_STATIC
+  charge_voltage_limit = bal_session_active ? CHARGE_VOLTAGE_LIMIT_54V
                                             : profile_charge_voltage_limit;
   charge_current_limit = calculate_charge_limit(effective_packs);
   discharge_current_limit = calculate_discharge_limit(effective_packs);
+
+  // Latch bank cell/temp extremes before agg_reset() clears them
+  bank_max_cell_mv = (agg_max_cell_mv != 0) ? agg_max_cell_mv : 0;
+  bank_min_cell_mv = (agg_min_cell_mv != 0xFFFF) ? agg_min_cell_mv : 0;
+  bank_temp_max = (agg_temp_max > -500.0f) ? agg_temp_max : BATTERY_TEMP_DEFAULT;
+  bank_temp_min = (agg_temp_min < 500.0f) ? agg_temp_min : BATTERY_TEMP_DEFAULT;
 
   // Set data valid now that fresh aggregated values are computed
   bms_data_valid = true;
@@ -1736,7 +1619,8 @@ static void send_deye_per_pack_frames(void) {
   uint8_t online_count = 0;
 
   for (uint8_t i = 0; i < HW_MODULE_COUNT; i++) {
-    if (hw_mod[i].last_ok_ms == 0)
+    if (hw_mod[i].last_ok_ms == 0 || !(pack_ever_seen_mask & (1u << i)) ||
+        pack_miss_count[i] > 5)
       continue;
     online_indices[online_count++] = i;
     const HwModule *m = &hw_mod[i];
@@ -1871,12 +1755,14 @@ static void send_all_frames(void) {
   can_ok = send_can_std(CAN_ID_BRAND, data, 8) && can_ok;
 
   memset(data, 0, 8);
-  uint16_t cell_max = (bms_data_valid && agg_max_cell_mv != 0) ? agg_max_cell_mv : 0;
-  uint16_t cell_min = (bms_data_valid && agg_min_cell_mv != 0xFFFF) ? agg_min_cell_mv : 0;
+  uint16_t cell_max = bms_data_valid ? bank_max_cell_mv : 0;
+  uint16_t cell_min = bms_data_valid ? bank_min_cell_mv : 0;
+  float t_max = bms_data_valid ? bank_temp_max : BATTERY_TEMP_DEFAULT;
+  float t_min = bms_data_valid ? bank_temp_min : BATTERY_TEMP_DEFAULT;
   put_u16le(&data[0], cell_max);
   put_u16le(&data[2], cell_min);
-  put_u16le(&data[4], (uint16_t)round_to_i16(agg_temp_max * 10.0f));
-  put_u16le(&data[6], (uint16_t)round_to_i16(agg_temp_min * 10.0f));
+  put_u16le(&data[4], (uint16_t)round_to_i16(t_max * 10.0f));
+  put_u16le(&data[6], (uint16_t)round_to_i16(t_min * 10.0f));
   can_ok = send_can_std(CAN_ID_CELL_EXTREMES, data, 8) && can_ok;
 
   static const uint8_t deye_cfg[8] = {0x20, 0x08, 0x21, 0x02, 0x00, 0x00, 0x00, 0x00};
@@ -1895,6 +1781,7 @@ static void send_all_frames(void) {
   put_u16le(&data[2], discharge_current_limit);
   can_ok = send_can_std(CAN_ID_GRID_LIMITS, data, 8) && can_ok;
 
+  watchdog_feed();
   if (bms_data_valid && can_ok) {
     send_deye_per_pack_frames();
   }
@@ -1952,6 +1839,11 @@ static void dip_charge_profile_apply(uint8_t code) {
       (code & DIP_CHARGE_CURRENT_15A) ? CHARGE_CURRENT_LIMIT_PER_PACK_DIP4_ON_X10
                                       : CHARGE_CURRENT_LIMIT_PER_PACK_X10;
   charge_voltage_limit = profile_charge_voltage_limit;
+  if (!bal_session_active || (code & DIP_BALANCE_54V)) {
+    calc_taper_start_mv = profile_taper_start_mv;
+    calc_charge_stop_mv = profile_charge_stop_mv;
+    calc_charge_reenable_mv = profile_charge_reenable_mv;
+  }
   dip_applied_code = code;
   pcs_mode_apply(code); // DIP2: mirror (OFF) vs inverter bridge (ON)
 }
@@ -2028,6 +1920,10 @@ int main(void) {
       bms_soc = BATTERY_SOC_DEFAULT;
       bms_soh = BATTERY_SOH_DEFAULT;
       bms_temp = BATTERY_TEMP_DEFAULT;
+      bank_max_cell_mv = 0;
+      bank_min_cell_mv = 0;
+      bank_temp_max = BATTERY_TEMP_DEFAULT;
+      bank_temp_min = BATTERY_TEMP_DEFAULT;
       charge_voltage_limit = profile_charge_voltage_limit;
       charge_current_limit = CHARGE_CURRENT_LIMIT_DEFAULT;
       discharge_current_limit = DISCHARGE_CURRENT_LIMIT_DEFAULT;
